@@ -18,8 +18,14 @@ fi
 
 ACTION="${1:-run}"
 
+if ! "${PYTHON_BIN}" -c "import kfp" >/dev/null 2>&1; then
+  log_fail "The 'kfp' Python package is not installed for ${PYTHON_BIN}."
+  echo "Run 'make install' first to create .venv with the pinned kfp SDK (see requirements-dev.txt)."
+  exit 1
+fi
+
 log_section "Detecting Data Science Pipelines server in namespace '${NAMESPACE}'"
-if ! python3 scripts/pipeline_client.py detect; then
+if ! "${PYTHON_BIN}" scripts/pipeline_client.py detect; then
   log_fail "No usable Data Science Pipelines server found in '${NAMESPACE}'."
   echo "This demo does NOT simulate a pipeline run without a real Pipeline Server."
   echo "See README.md 'Pipeline Server storage' to provision one (needs S3-compatible storage credentials)."
@@ -35,26 +41,26 @@ fi
 case "$ACTION" in
   upload)
     log_section "Uploading pipeline"
-    python3 scripts/pipeline_client.py upload
+    "${PYTHON_BIN}" scripts/pipeline_client.py upload
     ;;
   run)
     log_section "Uploading pipeline"
-    python3 scripts/pipeline_client.py upload
+    "${PYTHON_BIN}" scripts/pipeline_client.py upload
     log_section "Starting pipeline run"
-    python3 scripts/pipeline_client.py run
+    "${PYTHON_BIN}" scripts/pipeline_client.py run
     ;;
   status)
-    python3 scripts/pipeline_client.py status "${2:-}"
+    "${PYTHON_BIN}" scripts/pipeline_client.py status "${2:-}"
     ;;
   create-schedule)
     log_section "Uploading pipeline"
-    python3 scripts/pipeline_client.py upload
+    "${PYTHON_BIN}" scripts/pipeline_client.py upload
     log_section "Creating recurring run (cron: ${SCHEDULE_CRON})"
-    python3 scripts/pipeline_client.py create-schedule
+    "${PYTHON_BIN}" scripts/pipeline_client.py create-schedule
     ;;
   delete-schedule)
     log_section "Deleting recurring run"
-    python3 scripts/pipeline_client.py delete-schedule
+    "${PYTHON_BIN}" scripts/pipeline_client.py delete-schedule
     ;;
   *)
     echo "Usage: $0 [upload|run|status|create-schedule|delete-schedule]"

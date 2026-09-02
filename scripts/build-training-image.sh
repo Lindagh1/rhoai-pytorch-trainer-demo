@@ -46,7 +46,18 @@ if oc logs -f "${BUILD_NAME}" -n "${NAMESPACE}"; then
   :
 fi
 
-PHASE=$(oc get "${BUILD_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}')
+# `oc logs -f` returns as soon as the build pod's log stream ends, which can be a moment
+# before the Build controller patches status.phase to its final value. Poll briefly instead
+# of trusting a single immediate read, to avoid a false FAIL on an otherwise successful build.
+PHASE=""
+for _ in $(seq 1 30); do
+  PHASE=$(oc get "${BUILD_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  case "$PHASE" in
+    Complete|Failed|Error|Cancelled) break ;;
+  esac
+  sleep 1
+done
+
 if [ "$PHASE" = "Complete" ]; then
   IMAGE_REF=$(oc get imagestreamtag "${IMAGE_STREAM_NAME}:${IMAGE_TAG}" -n "${NAMESPACE}" -o jsonpath='{.image.dockerImageReference}' 2>/dev/null || echo "unknown")
   log_pass "Build complete. Image: ${IMAGE_REF}"

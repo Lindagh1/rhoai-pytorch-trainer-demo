@@ -27,8 +27,8 @@ set -euo pipefail
 : "${TRAINJOB_NAME:=pytorch-trainer-demo}"
 : "${TRAIN_NODES:=2}"
 : "${GPU_PER_NODE:=0}"
-: "${TRAIN_CPU:=1}"
-: "${TRAIN_MEMORY:=2Gi}"
+: "${TRAIN_CPU:=250m}"
+: "${TRAIN_MEMORY:=768Mi}"
 : "${TRAIN_EPOCHS:=5}"
 : "${TRAIN_LR:=0.01}"
 : "${TRAIN_BATCH_SIZE:=32}"
@@ -45,6 +45,15 @@ set -euo pipefail
 : "${TRAINJOB_WAIT_TIMEOUT_SECONDS:=1200}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Prefer the project-local virtualenv (created by `make install`) so that scripts which
+# need kfp/kubernetes/mlflow python packages (e.g. pipeline_client.py) don't silently fall
+# back to a bare system `python3` that is missing those packages.
+if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+  PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
 
 # --------------------------------------------------------------------------------------
 # Output helpers

@@ -12,8 +12,8 @@ IMAGE_TAG          ?= latest
 TRAINJOB_NAME      ?= pytorch-trainer-demo
 TRAIN_NODES        ?= 2
 GPU_PER_NODE       ?= 0
-TRAIN_CPU          ?= 1
-TRAIN_MEMORY       ?= 2Gi
+TRAIN_CPU          ?= 250m
+TRAIN_MEMORY       ?= 768Mi
 TRAIN_EPOCHS       ?= 5
 TRAIN_LR           ?= 0.01
 TRAIN_BATCH_SIZE   ?= 32
@@ -113,7 +113,10 @@ status:
 	@oc get trainjob -n $(NAMESPACE) -l app.kubernetes.io/part-of=rhoai-pytorch-trainer-demo 2>/dev/null || echo "  (none -- run 'make train')"
 	@echo ""
 	@echo "Pipeline server:"
-	@python3 scripts/pipeline_client.py detect 2>/dev/null || echo "  NOT AVAILABLE"
+	@if [ -x .venv/bin/python ]; then \
+		OUT=$$($(VENV_PYTHON) scripts/pipeline_client.py detect 2>/dev/null); RC=$$?; \
+		if [ $$RC -eq 0 ]; then echo "  $$OUT"; else echo "  NOT AVAILABLE"; fi; \
+	else echo "  (unknown -- run 'make install' then 'make status' to check)"; fi
 
 cleanup:
 	./scripts/cleanup.sh
@@ -123,7 +126,7 @@ demo:
 	./scripts/bootstrap.sh
 	./scripts/build-training-image.sh
 	./scripts/run-trainjob.sh
-	@if python3 scripts/pipeline_client.py detect >/dev/null 2>&1; then \
+	@if [ -x .venv/bin/python ] && $(VENV_PYTHON) scripts/pipeline_client.py detect >/dev/null 2>&1; then \
 		$(MAKE) pipeline; \
 	else \
 		echo "Pipeline Server not available -- skipping the AI Pipeline stage (see README.md 'Pipeline Server')"; \

@@ -12,9 +12,9 @@
 #    n_features: int [Default: 8.0]
 #    namespace: str [Default: 'rhoai-training-demo']
 #    seed: int [Default: 42.0]
-#    train_cpu: str [Default: '1']
+#    train_cpu: str [Default: '250m']
 #    train_image: str [Default: 'image-registry.openshift-image-registry.svc:5000/rhoai-training-demo/pytorch-trainer-demo:latest']
-#    train_memory: str [Default: '2Gi']
+#    train_memory: str [Default: '768Mi']
 #    train_nodes: int [Default: 2.0]
 #    train_samples: int [Default: 2048.0]
 #    trainjob_name: str [Default: 'pytorch-trainer-demo-pipeline']
@@ -410,7 +410,7 @@ root:
         isOptional: true
         parameterType: NUMBER_INTEGER
       train_cpu:
-        defaultValue: '1'
+        defaultValue: 250m
         isOptional: true
         parameterType: STRING
       train_image:
@@ -418,7 +418,7 @@ root:
         isOptional: true
         parameterType: STRING
       train_memory:
-        defaultValue: 2Gi
+        defaultValue: 768Mi
         isOptional: true
         parameterType: STRING
       train_nodes:

@@ -37,7 +37,14 @@ if oc get trainjob "${TRAINJOB_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
     fail "TrainJob '${TRAINJOB_NAME}' has not completed successfully (Complete=${COMPLETE:-unknown})"
   fi
 
-  POD_NAMES=$(oc get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | awk -v p="${TRAINJOB_NAME}-" '$1 ~ "^"p {print $1}')
+  # Kubeflow Trainer v2 creates worker pods via a JobSet, labeled with
+  # jobset.sigs.k8s.io/jobset-name=<TrainJob name>. Use that label (not a name prefix) so
+  # this never accidentally counts unrelated pods that share the same name prefix, such as
+  # this repo's own "<name>-<N>-build" OpenShift Build pods from 'make build'.
+  POD_NAMES=$(oc get pods -n "${NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=${TRAINJOB_NAME}" --no-headers 2>/dev/null | awk '{print $1}')
+  if [ -z "$POD_NAMES" ]; then
+    POD_NAMES=$(oc get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | awk -v p="${TRAINJOB_NAME}-" '$1 ~ "^"p && $1 !~ /-build$/ {print $1}')
+  fi
   POD_COUNT=$(echo "$POD_NAMES" | grep -c . || true)
   if [ "$POD_COUNT" -ge "$TRAIN_NODES" ] 2>/dev/null; then
     log_pass "${POD_COUNT} worker pod(s) visible for TrainJob '${TRAINJOB_NAME}' (expected >= ${TRAIN_NODES})"

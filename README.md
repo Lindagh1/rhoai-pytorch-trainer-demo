@@ -99,7 +99,7 @@ make train
 | `GIT_REPO_URL` / `GIT_REF` | auto-detected from `git remote`/`git branch` | Source the OpenShift Build pulls from |
 | `TRAIN_NODES` | `2` | Number of distributed training nodes |
 | `GPU_PER_NODE` | `0` | GPUs requested per node (`0` = CPU-only demo mode) |
-| `TRAIN_CPU` / `TRAIN_MEMORY` | `1` / `2Gi` | CPU/memory requested per training node |
+| `TRAIN_CPU` / `TRAIN_MEMORY` | `250m` / `768Mi` | CPU/memory requested per training node (deliberately tiny on CPU -- the workload is a synthetic toy model; memory is kept high enough for the PyTorch import itself. Lower/raise via env vars to fit your sandbox) |
 | `TRAIN_EPOCHS` / `TRAIN_LR` / `TRAIN_BATCH_SIZE` | `5` / `0.01` / `32` | Training hyperparameters |
 | `PIPELINE_NAME` | `pytorch-trainer-demo-pipeline` | Name used when uploading the pipeline |
 | `SCHEDULE_CRON` | `0 2 * * *` | Cron expression for `make create-schedule` |
