@@ -58,12 +58,15 @@ case "$ACTION" in
     log_section "Creating recurring run (cron: ${SCHEDULE_CRON})"
     "${PYTHON_BIN}" scripts/pipeline_client.py create-schedule
     ;;
+  schedule-status)
+    "${PYTHON_BIN}" scripts/pipeline_client.py schedule-status
+    ;;
   delete-schedule)
     log_section "Deleting recurring run"
     "${PYTHON_BIN}" scripts/pipeline_client.py delete-schedule
     ;;
   *)
-    echo "Usage: $0 [upload|run|status|create-schedule|delete-schedule]"
+    echo "Usage: $0 [upload|run|status|create-schedule|schedule-status|delete-schedule]"
     exit 2
     ;;
 esac

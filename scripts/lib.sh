@@ -23,10 +23,22 @@ set -euo pipefail
 : "${GIT_REF:=$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}"
 : "${GIT_REPO_URL:=$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." config --get remote.origin.url 2>/dev/null || echo "")}"
 : "${SOURCE_SECRET_NAME:=}"
+: "${GIT_SHA:=$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse HEAD 2>/dev/null || echo unknown)}"
+GIT_SHA_SHORT="${GIT_SHA:0:12}"
 
 : "${TRAINJOB_NAME:=pytorch-trainer-demo}"
 : "${TRAIN_NODES:=2}"
-: "${GPU_PER_NODE:=0}"
+
+# MODE=cpu|gpu is a convenience switch (`make train MODE=gpu`) that only takes effect if
+# GPU_PER_NODE was NOT already explicitly set -- an explicit GPU_PER_NODE always wins, so
+# `GPU_PER_NODE=2 MODE=gpu` still requests 2 GPUs/node, not the MODE=gpu default of 1.
+: "${MODE:=}"
+if [ -z "${GPU_PER_NODE:-}" ]; then
+  case "${MODE}" in
+    gpu) GPU_PER_NODE=1 ;;
+    *) GPU_PER_NODE=0 ;;
+  esac
+fi
 : "${TRAIN_CPU:=250m}"
 : "${TRAIN_MEMORY:=768Mi}"
 : "${TRAIN_EPOCHS:=5}"
@@ -35,6 +47,7 @@ set -euo pipefail
 
 : "${MLFLOW_TRACKING_URI:=}"
 : "${MLFLOW_EXPERIMENT_NAME:=rhoai-pytorch-trainer-demo}"
+: "${USE_MLFLOW:=auto}"   # auto|true|false -- see detect_mlflow_uri()
 
 : "${PIPELINE_NAME:=pytorch-trainer-demo-pipeline}"
 : "${PIPELINE_SERVICE_ACCOUNT:=pipeline-trainjob-runner}"
@@ -43,6 +56,20 @@ set -euo pipefail
 : "${SCHEDULE_NAME:=pytorch-trainer-demo-nightly}"
 
 : "${TRAINJOB_WAIT_TIMEOUT_SECONDS:=1200}"
+
+# --------------------------------------------------------------------------------------
+# Object storage (MinIO) / Pipeline Server / MLflow -- all namespace-local, all optional
+# except where `make pipeline` needs the Pipeline Server.
+# --------------------------------------------------------------------------------------
+: "${MINIO_IMAGE:=quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z}"
+: "${MINIO_MC_IMAGE:=quay.io/minio/mc:latest}"
+: "${MINIO_STORAGE_SIZE:=5Gi}"
+: "${PIPELINE_BUCKET:=mlpipeline}"
+: "${MLFLOW_BUCKET:=mlflow}"
+: "${CHECKPOINT_BUCKET:=checkpoints}"
+: "${DSPA_NAME:=dspa}"
+: "${DSPA_WAIT_TIMEOUT_SECONDS:=300}"
+: "${MLFLOW_IMAGE_STREAM_NAME:=pytorch-trainer-demo-mlflow}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -102,8 +129,10 @@ gpu_resource_lines() {
 }
 
 mlflow_env_block() {
-  if [ -n "${MLFLOW_TRACKING_URI}" ]; then
-    printf '      - name: MLFLOW_TRACKING_URI\n        value: "%s"\n' "${MLFLOW_TRACKING_URI}"
+  local uri
+  uri=$(detect_mlflow_uri)
+  if [ -n "$uri" ]; then
+    printf '      - name: MLFLOW_TRACKING_URI\n        value: "%s"\n' "${uri}"
   else
     echo ""
   fi
@@ -111,4 +140,56 @@ mlflow_env_block() {
 
 oc_login_check() {
   oc whoami >/dev/null 2>&1
+}
+
+# Resolves the MLflow tracking URI to actually use, honoring USE_MLFLOW:
+#   USE_MLFLOW=false -> always empty (MLflow explicitly disabled for this run)
+#   MLFLOW_TRACKING_URI already set -> use it as-is (explicit override wins)
+#   USE_MLFLOW=auto|true -> auto-detect this demo's own MLflow Route (see scripts/mlflow.sh)
+# Prints the URI (possibly empty) on stdout; never fails.
+detect_mlflow_uri() {
+  if [ "${USE_MLFLOW}" = "false" ]; then
+    echo ""
+    return 0
+  fi
+  if [ -n "${MLFLOW_TRACKING_URI}" ]; then
+    echo "${MLFLOW_TRACKING_URI}"
+    return 0
+  fi
+  local host
+  host=$(oc get route mlflow -n "${NAMESPACE}" -o jsonpath='{.spec.host}' 2>/dev/null || true)
+  if [ -n "$host" ]; then
+    echo "https://${host}"
+    return 0
+  fi
+  echo ""
+}
+
+# Emits the env entries that let a TrainJob pod upload its checkpoint to this demo's
+# namespace-local MinIO instance, IF that instance actually exists in ${NAMESPACE}. Never
+# hardcodes credentials -- they are always sourced from the 'minio-credentials' Secret via
+# valueFrom.secretKeyRef, so the rendered manifest never contains a plaintext secret.
+checkpoint_s3_env_block() {
+  if ! oc get secret minio-credentials -n "${NAMESPACE}" >/dev/null 2>&1; then
+    echo ""
+    return 0
+  fi
+  cat <<EOF
+      - name: CHECKPOINT_S3_BUCKET
+        value: "${CHECKPOINT_BUCKET}"
+      - name: CHECKPOINT_S3_PREFIX
+        value: "${TRAINJOB_NAME}"
+      - name: S3_ENDPOINT_URL
+        value: "http://minio.${NAMESPACE}.svc.cluster.local:9000"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: minio-credentials
+            key: MINIO_ROOT_USER
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: minio-credentials
+            key: MINIO_ROOT_PASSWORD
+EOF
 }

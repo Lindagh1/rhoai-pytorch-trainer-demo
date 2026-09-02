@@ -8,3 +8,7 @@ numpy==1.26.4
 # Optional experiment tracking client. train.py/evaluate.py degrade gracefully if
 # MLFLOW_TRACKING_URI is unset, even though this package is always present in the image.
 mlflow==2.16.2
+
+# Optional S3-compatible checkpoint upload (see train.py CheckpointStore). Degrades
+# gracefully if CHECKPOINT_S3_BUCKET is unset, even though the package is always present.
+boto3==1.35.36

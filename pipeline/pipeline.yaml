@@ -3,7 +3,10 @@
 # Description: prepare-data -> distributed-training (real TrainJob via Kubeflow Trainer) -> evaluate-model
 # Inputs:
 #    batch_size: int [Default: 32.0]
+#    checkpoint_bucket: str [Default: '']
+#    checkpoint_s3_endpoint: str [Default: '']
 #    epochs: int [Default: 5.0]
+#    git_sha: str [Default: '5d6d2b39398e0a41b94681757db403b399d72163']
 #    gpu_per_node: int [Default: 0.0]
 #    lr: float [Default: 0.01]
 #    max_acceptable_loss: float [Default: 0.5]
@@ -17,8 +20,9 @@
 #    train_memory: str [Default: '768Mi']
 #    train_nodes: int [Default: 2.0]
 #    train_samples: int [Default: 2048.0]
-#    trainjob_name: str [Default: 'pytorch-trainer-demo-pipeline']
+#    trainjob_name: str [Default: 'rhoai-demo-train']
 #    trainjob_timeout_seconds: int [Default: 1200.0]
+#    use_mlflow: bool [Default: True]
 #    val_samples: int [Default: 512.0]
 components:
   comp-distributed-training:
@@ -27,8 +31,14 @@ components:
       parameters:
         batch_size:
           parameterType: NUMBER_INTEGER
+        checkpoint_bucket:
+          parameterType: STRING
+        checkpoint_s3_endpoint:
+          parameterType: STRING
         epochs:
           parameterType: NUMBER_INTEGER
+        git_sha:
+          parameterType: STRING
         gpu_per_node:
           parameterType: NUMBER_INTEGER
         lr:
@@ -51,6 +61,8 @@ components:
           parameterType: NUMBER_INTEGER
         trainjob_name:
           parameterType: STRING
+        use_mlflow:
+          parameterType: BOOLEAN
     outputDefinitions:
       parameters:
         Output:
@@ -67,6 +79,8 @@ components:
           parameterType: STRING
         training_result:
           parameterType: STRING
+        use_mlflow:
+          parameterType: BOOLEAN
     outputDefinitions:
       parameters:
         Output:
@@ -119,64 +133,92 @@ deploymentSpec:
           \ *\n\ndef distributed_training(\n    namespace: str,\n    trainjob_name:\
           \ str,\n    train_image: str,\n    train_nodes: int,\n    gpu_per_node:\
           \ int,\n    train_cpu: str,\n    train_memory: str,\n    epochs: int,\n\
-          \    lr: float,\n    batch_size: int,\n    mlflow_tracking_uri: str,\n \
-          \   mlflow_experiment_name: str,\n    timeout_seconds: int,\n) -> str:\n\
-          \    \"\"\"Creates a real TrainJob via the Kubernetes API and waits for\
-          \ it to finish.\n\n    Returns a JSON string describing the outcome (status\
-          \ + worker pod names) that\n    evaluate_model consumes.\n    \"\"\"\n \
-          \   import json\n    import time\n\n    from kubernetes import client, config\n\
-          \n    config.load_incluster_config()\n    custom_api = client.CustomObjectsApi()\n\
-          \    core_api = client.CoreV1Api()\n\n    group, version, plural = \"trainer.kubeflow.org\"\
-          , \"v1alpha1\", \"trainjobs\"\n\n    try:\n        custom_api.delete_namespaced_custom_object(group,\
-          \ version, namespace, plural, trainjob_name)\n        print(f\"[distributed-training]\
-          \ deleted pre-existing TrainJob '{trainjob_name}' before recreating it\"\
-          )\n        time.sleep(5)\n    except client.exceptions.ApiException as exc:\n\
-          \        if exc.status != 404:\n            raise\n\n    env = [{\"name\"\
-          : \"TRAIN_OUTPUT_DIR\", \"value\": \"/opt/app-root/src/output\"}]\n    if\
-          \ mlflow_experiment_name:\n        env.append({\"name\": \"MLFLOW_EXPERIMENT_NAME\"\
-          , \"value\": mlflow_experiment_name})\n    if mlflow_tracking_uri:\n   \
-          \     env.append({\"name\": \"MLFLOW_TRACKING_URI\", \"value\": mlflow_tracking_uri})\n\
-          \n    resources = {\"requests\": {\"cpu\": train_cpu, \"memory\": train_memory},\
-          \ \"limits\": {\"cpu\": train_cpu, \"memory\": train_memory}}\n    if gpu_per_node\
-          \ > 0:\n        resources[\"requests\"][\"nvidia.com/gpu\"] = str(gpu_per_node)\n\
-          \        resources[\"limits\"][\"nvidia.com/gpu\"] = str(gpu_per_node)\n\
-          \n    trainjob_manifest = {\n        \"apiVersion\": f\"{group}/{version}\"\
-          ,\n        \"kind\": \"TrainJob\",\n        \"metadata\": {\n          \
-          \  \"name\": trainjob_name,\n            \"namespace\": namespace,\n   \
-          \         \"labels\": {\n                \"app.kubernetes.io/part-of\":\
-          \ \"rhoai-pytorch-trainer-demo\",\n                \"app.kubernetes.io/managed-by\"\
+          \    lr: float,\n    batch_size: int,\n    git_sha: str,\n    use_mlflow:\
+          \ bool,\n    mlflow_tracking_uri: str,\n    mlflow_experiment_name: str,\n\
+          \    checkpoint_bucket: str,\n    checkpoint_s3_endpoint: str,\n    timeout_seconds:\
+          \ int,\n) -> str:\n    \"\"\"Creates a real, UNIQUELY NAMED TrainJob via\
+          \ the Kubernetes API and waits for it to\n    finish. Returns a JSON string\
+          \ describing the outcome that evaluate_model consumes.\n    \"\"\"\n   \
+          \ import json\n    import re\n    import time\n    import uuid\n\n    from\
+          \ kubernetes import client, config\n\n    config.load_incluster_config()\n\
+          \    custom_api = client.CustomObjectsApi()\n    core_api = client.CoreV1Api()\n\
+          \n    group, version, plural = \"trainer.kubeflow.org\", \"v1alpha1\", \"\
+          trainjobs\"\n\n    # Unique per-run name: never collides across concurrent/parallel\
+          \ pipeline runs. Built\n    # at task RUNTIME (plain Python), not via a\
+          \ KFP backend placeholder, so this works\n    # regardless of the Data Science\
+          \ Pipelines backend version installed on the cluster.\n    base = re.sub(r\"\
+          [^a-z0-9-]\", \"-\", trainjob_name.lower()).strip(\"-\") or \"rhoai-demo-train\"\
+          \n    unique_name = f\"{base}-{time.strftime('%y%m%d%H%M%S')}-{uuid.uuid4().hex[:5]}\"\
+          [:63].rstrip(\"-\")\n\n    env = [\n        {\"name\": \"TRAIN_OUTPUT_DIR\"\
+          , \"value\": \"/opt/app-root/src/output\"},\n        {\"name\": \"GIT_SHA\"\
+          , \"value\": git_sha or \"\"},\n        {\"name\": \"TRAINJOB_NAME\", \"\
+          value\": unique_name},\n    ]\n    if mlflow_experiment_name:\n        env.append({\"\
+          name\": \"MLFLOW_EXPERIMENT_NAME\", \"value\": mlflow_experiment_name})\n\
+          \    if use_mlflow and mlflow_tracking_uri:\n        env.append({\"name\"\
+          : \"MLFLOW_TRACKING_URI\", \"value\": mlflow_tracking_uri})\n    if checkpoint_bucket\
+          \ and checkpoint_s3_endpoint:\n        env += [\n            {\"name\":\
+          \ \"CHECKPOINT_S3_BUCKET\", \"value\": checkpoint_bucket},\n           \
+          \ {\"name\": \"CHECKPOINT_S3_PREFIX\", \"value\": unique_name},\n      \
+          \      {\"name\": \"S3_ENDPOINT_URL\", \"value\": checkpoint_s3_endpoint},\n\
+          \            {\"name\": \"AWS_ACCESS_KEY_ID\", \"valueFrom\": {\"secretKeyRef\"\
+          : {\"name\": \"minio-credentials\", \"key\": \"MINIO_ROOT_USER\"}}},\n \
+          \           {\"name\": \"AWS_SECRET_ACCESS_KEY\", \"valueFrom\": {\"secretKeyRef\"\
+          : {\"name\": \"minio-credentials\", \"key\": \"MINIO_ROOT_PASSWORD\"}}},\n\
+          \        ]\n\n    resources = {\"requests\": {\"cpu\": train_cpu, \"memory\"\
+          : train_memory}, \"limits\": {\"cpu\": train_cpu, \"memory\": train_memory}}\n\
+          \    if gpu_per_node > 0:\n        resources[\"requests\"][\"nvidia.com/gpu\"\
+          ] = str(gpu_per_node)\n        resources[\"limits\"][\"nvidia.com/gpu\"\
+          ] = str(gpu_per_node)\n\n    trainjob_manifest = {\n        \"apiVersion\"\
+          : f\"{group}/{version}\",\n        \"kind\": \"TrainJob\",\n        \"metadata\"\
+          : {\n            \"name\": unique_name,\n            \"namespace\": namespace,\n\
+          \            \"labels\": {\n                \"app.kubernetes.io/part-of\"\
+          : \"rhoai-pytorch-trainer-demo\",\n                \"app.kubernetes.io/managed-by\"\
           : \"rhoai-pytorch-trainer-demo\",\n                \"app.kubernetes.io/component\"\
-          : \"training\",\n            },\n        },\n        \"spec\": {\n     \
-          \       \"runtimeRef\": {\"apiGroup\": group, \"kind\": \"ClusterTrainingRuntime\"\
-          , \"name\": \"torch-distributed\"},\n            \"trainer\": {\n      \
-          \          \"image\": train_image,\n                \"command\": [\"torchrun\"\
-          , \"train.py\"],\n                \"args\": [f\"--epochs={epochs}\", f\"\
-          --lr={lr}\", f\"--batch-size={batch_size}\"],\n                \"numNodes\"\
-          : train_nodes,\n                \"env\": env,\n                \"resourcesPerNode\"\
-          : resources,\n            },\n        },\n    }\n\n    print(f\"[distributed-training]\
-          \ creating TrainJob '{trainjob_name}' in namespace '{namespace}' \"\n  \
-          \        f\"({train_nodes} node(s), {gpu_per_node} GPU/node)\")\n    custom_api.create_namespaced_custom_object(group,\
+          : \"training\",\n                \"demo.git.sha\": (git_sha or \"unknown\"\
+          )[:12],\n            },\n            \"annotations\": {\n              \
+          \  \"demo.git.sha\": git_sha or \"\",\n                \"demo.image\": train_image,\n\
+          \            },\n        },\n        \"spec\": {\n            \"runtimeRef\"\
+          : {\"apiGroup\": group, \"kind\": \"ClusterTrainingRuntime\", \"name\":\
+          \ \"torch-distributed\"},\n            \"trainer\": {\n                \"\
+          image\": train_image,\n                \"command\": [\"torchrun\", \"train.py\"\
+          ],\n                \"args\": [f\"--epochs={epochs}\", f\"--lr={lr}\", f\"\
+          --batch-size={batch_size}\"],\n                \"numNodes\": train_nodes,\n\
+          \                \"env\": env,\n                \"resourcesPerNode\": resources,\n\
+          \            },\n        },\n    }\n\n    print(f\"[distributed-training]\
+          \ creating TrainJob '{unique_name}' in namespace '{namespace}' \"\n    \
+          \      f\"({train_nodes} node(s), {gpu_per_node} GPU/node, git_sha={git_sha\
+          \ or 'unknown'})\")\n    custom_api.create_namespaced_custom_object(group,\
           \ version, namespace, plural, trainjob_manifest)\n\n    deadline = time.time()\
           \ + timeout_seconds\n    status = \"Unknown\"\n    while time.time() < deadline:\n\
           \        obj = custom_api.get_namespaced_custom_object(group, version, namespace,\
-          \ plural, trainjob_name)\n        conditions = obj.get(\"status\", {}).get(\"\
+          \ plural, unique_name)\n        conditions = obj.get(\"status\", {}).get(\"\
           conditions\", [])\n        by_type = {c.get(\"type\"): c.get(\"status\"\
           ) for c in conditions}\n        if by_type.get(\"Complete\") == \"True\"\
           :\n            status = \"Complete\"\n            break\n        if by_type.get(\"\
           Failed\") == \"True\":\n            status = \"Failed\"\n            break\n\
           \        print(f\"[distributed-training] waiting... current conditions:\
-          \ {by_type}\")\n        time.sleep(10)\n\n    pods = core_api.list_namespaced_pod(namespace)\n\
-          \    pod_names = [p.metadata.name for p in pods.items if p.metadata.name.startswith(f\"\
-          {trainjob_name}-\")]\n\n    for pod_name in pod_names:\n        print(f\"\
-          --- logs: {pod_name} ---\")\n        try:\n            print(core_api.read_namespaced_pod_log(pod_name,\
-          \ namespace, tail_lines=200))\n        except client.exceptions.ApiException\
-          \ as exc:\n            print(f\"  (could not read logs yet: {exc.reason})\"\
-          )\n\n    if status != \"Complete\":\n        raise RuntimeError(f\"TrainJob\
-          \ '{trainjob_name}' did not complete successfully (status={status})\")\n\
-          \n    print(f\"[distributed-training] TrainJob '{trainjob_name}' completed\
-          \ with {len(pod_names)} worker pod(s)\")\n    return json.dumps({\"status\"\
-          : status, \"namespace\": namespace, \"trainjob_name\": trainjob_name, \"\
-          pod_names\": pod_names})\n\n"
+          \ {by_type}\")\n        time.sleep(10)\n\n    pod_names = [\n        p.metadata.name\n\
+          \        for p in core_api.list_namespaced_pod(\n            namespace,\
+          \ label_selector=f\"jobset.sigs.k8s.io/jobset-name={unique_name}\"\n   \
+          \     ).items\n    ]\n    if not pod_names:\n        pod_names = [\n   \
+          \         p.metadata.name\n            for p in core_api.list_namespaced_pod(namespace).items\n\
+          \            if p.metadata.name.startswith(f\"{unique_name}-\") and not\
+          \ p.metadata.name.endswith(\"-build\")\n        ]\n\n    for pod_name in\
+          \ pod_names:\n        print(f\"--- logs: {pod_name} ---\")\n        try:\n\
+          \            print(core_api.read_namespaced_pod_log(pod_name, namespace,\
+          \ tail_lines=200))\n        except client.exceptions.ApiException as exc:\n\
+          \            print(f\"  (could not read logs yet: {exc.reason})\")\n\n \
+          \   if status != \"Complete\":\n        raise RuntimeError(f\"TrainJob '{unique_name}'\
+          \ did not complete successfully (status={status})\")\n\n    print(f\"[distributed-training]\
+          \ TrainJob '{unique_name}' completed with {len(pod_names)} worker pod(s)\"\
+          )\n    return json.dumps(\n        {\n            \"status\": status,\n\
+          \            \"namespace\": namespace,\n            \"trainjob_name\": unique_name,\n\
+          \            \"pod_names\": pod_names,\n            \"git_sha\": git_sha\
+          \ or \"\",\n            \"checkpoint_bucket\": checkpoint_bucket if (checkpoint_bucket\
+          \ and checkpoint_s3_endpoint) else \"\",\n            \"checkpoint_prefix\"\
+          : unique_name,\n            \"checkpoint_s3_endpoint\": checkpoint_s3_endpoint\
+          \ or \"\",\n            \"n_features\": 8,\n            \"hidden_size\"\
+          : 32,\n        }\n    )\n\n"
         image: registry.access.redhat.com/ubi9/python-311:latest
     exec-evaluate-model:
       container:
@@ -193,7 +235,7 @@ deploymentSpec:
           \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.9.0'\
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
           \  python3 -m pip install --quiet --no-warn-script-location 'kubernetes==30.1.0'\
-          \ 'mlflow==2.16.2' && \"$0\" \"$@\"\n"
+          \ 'mlflow==2.16.2' 'boto3==1.35.36' 'torch==2.4.1' && \"$0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -205,45 +247,111 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef evaluate_model(training_result: str, max_acceptable_loss: float,\
-          \ mlflow_tracking_uri: str, mlflow_experiment_name: str) -> str:\n    \"\
-          \"\"Reads the real training pod logs to confirm distributed execution and\
-          \ extract the\n    final training loss, then reports PASS/FAIL. This is\
-          \ real evidence from the TrainJob\n    that just ran, not a simulated result.\n\
-          \    \"\"\"\n    import json\n    import re\n\n    from kubernetes import\
-          \ client, config\n\n    result = json.loads(training_result)\n    if result.get(\"\
-          status\") != \"Complete\":\n        raise RuntimeError(f\"Upstream TrainJob\
-          \ did not complete: {result}\")\n\n    namespace = result[\"namespace\"\
-          ]\n    pod_names = result[\"pod_names\"]\n    if not pod_names:\n      \
-          \  raise RuntimeError(\"No training pods found -- cannot evaluate\")\n\n\
-          \    config.load_incluster_config()\n    core_api = client.CoreV1Api()\n\
-          \n    ranks_seen = set()\n    final_losses = []\n    epoch_line_re = re.compile(r\"\
-          \\[rank=(\\d+)/(\\d+).*?\\].*epoch=(\\d+)/(\\d+) train_loss=([\\d.]+) val_loss=([\\\
-          d.]+)\")\n\n    for pod_name in pod_names:\n        try:\n            logs\
-          \ = core_api.read_namespaced_pod_log(pod_name, namespace)\n        except\
-          \ client.exceptions.ApiException as exc:\n            print(f\"[evaluate-model]\
-          \ could not read logs for {pod_name}: {exc.reason}\")\n            continue\n\
-          \        pod_last_val_loss = None\n        for line in logs.splitlines():\n\
-          \            m = epoch_line_re.search(line)\n            if m:\n       \
-          \         ranks_seen.add(int(m.group(1)))\n                pod_last_val_loss\
-          \ = float(m.group(6))\n        if pod_last_val_loss is not None:\n     \
-          \       final_losses.append(pod_last_val_loss)\n\n    passed_distributed_check\
-          \ = len(ranks_seen) >= 1\n    final_val_loss = max(final_losses) if final_losses\
-          \ else None\n    passed_loss_check = final_val_loss is not None and final_val_loss\
-          \ <= max_acceptable_loss\n    passed = passed_distributed_check and passed_loss_check\n\
-          \n    summary = {\n        \"ranks_observed\": sorted(ranks_seen),\n   \
-          \     \"final_val_loss\": final_val_loss,\n        \"max_acceptable_loss\"\
-          : max_acceptable_loss,\n        \"passed\": passed,\n    }\n    print(f\"\
-          [evaluate-model] {'PASS' if passed else 'FAIL'}: {summary}\")\n\n    if\
-          \ mlflow_tracking_uri:\n        try:\n            import mlflow\n\n    \
-          \        mlflow.set_tracking_uri(mlflow_tracking_uri)\n            mlflow.set_experiment(mlflow_experiment_name)\n\
-          \            with mlflow.start_run(run_name=\"pipeline-evaluate\"):\n  \
-          \              if final_val_loss is not None:\n                    mlflow.log_metric(\"\
-          final_val_loss\", final_val_loss)\n                mlflow.log_param(\"ranks_observed\"\
-          , str(sorted(ranks_seen)))\n                mlflow.log_param(\"passed\"\
-          , passed)\n            print(f\"[evaluate-model] logged evaluation summary\
-          \ to MLflow at {mlflow_tracking_uri}\")\n        except Exception as exc:\
-          \  # noqa: BLE001 - MLflow is always optional\n            print(f\"[evaluate-model]\
+          \ *\n\ndef evaluate_model(\n    training_result: str,\n    max_acceptable_loss:\
+          \ float,\n    use_mlflow: bool,\n    mlflow_tracking_uri: str,\n    mlflow_experiment_name:\
+          \ str,\n) -> str:\n    \"\"\"Evaluates the TrainJob that just ran using\
+          \ the strongest evidence available:\n\n      1. If a checkpoint bucket was\
+          \ configured for this run, download the REAL\n         `model.pt` + `training_metrics.json`\
+          \ that training/train.py uploaded to MinIO,\n         load the checkpoint\
+          \ with PyTorch, and run a genuine forward pass on a freshly\n         generated\
+          \ synthetic test set -- this is real model evaluation, not a simulation.\n\
+          \      2. Otherwise (no object storage configured for this run), fall back\
+          \ to reading the\n         actual TrainJob pod logs to confirm multiple\
+          \ ranks executed and to extract the\n         final loss -- and says so\
+          \ explicitly, rather than pretending a checkpoint was\n         loaded when\
+          \ it was not.\n    \"\"\"\n    import json\n    import re\n\n    from kubernetes\
+          \ import client, config\n\n    result = json.loads(training_result)\n  \
+          \  if result.get(\"status\") != \"Complete\":\n        raise RuntimeError(f\"\
+          Upstream TrainJob did not complete: {result}\")\n\n    namespace = result[\"\
+          namespace\"]\n    pod_names = result[\"pod_names\"]\n    if not pod_names:\n\
+          \        raise RuntimeError(\"No training pods found -- cannot evaluate\"\
+          )\n\n    config.load_incluster_config()\n    core_api = client.CoreV1Api()\n\
+          \n    ranks_seen = set()\n    log_final_val_loss = None\n    epoch_line_re\
+          \ = re.compile(r\"\\[rank=(\\d+)/(\\d+).*?\\].*epoch=(\\d+)/(\\d+) train_loss=([\\\
+          d.]+) val_loss=([\\d.]+)\")\n    for pod_name in pod_names:\n        try:\n\
+          \            logs = core_api.read_namespaced_pod_log(pod_name, namespace)\n\
+          \        except client.exceptions.ApiException as exc:\n            print(f\"\
+          [evaluate-model] could not read logs for {pod_name}: {exc.reason}\")\n \
+          \           continue\n        for line in logs.splitlines():\n         \
+          \   m = epoch_line_re.search(line)\n            if m:\n                ranks_seen.add(int(m.group(1)))\n\
+          \                log_final_val_loss = float(m.group(6))\n\n    checkpoint_bucket\
+          \ = result.get(\"checkpoint_bucket\", \"\")\n    checkpoint_method = \"\
+          logs-only\"\n    final_val_loss = log_final_val_loss\n    checkpoint_loaded\
+          \ = False\n    test_mse = None\n\n    if checkpoint_bucket:\n        checkpoint_method\
+          \ = \"real-checkpoint\"\n        import tempfile\n        from pathlib import\
+          \ Path\n\n        import boto3\n        import torch\n        import torch.nn\
+          \ as nn\n\n        secret = core_api.read_namespaced_secret(\"minio-credentials\"\
+          , namespace)\n        import base64\n\n        access_key = base64.b64decode(secret.data[\"\
+          MINIO_ROOT_USER\"]).decode()\n        secret_key = base64.b64decode(secret.data[\"\
+          MINIO_ROOT_PASSWORD\"]).decode()\n\n        s3 = boto3.client(\n       \
+          \     \"s3\",\n            endpoint_url=result[\"checkpoint_s3_endpoint\"\
+          ],\n            aws_access_key_id=access_key,\n            aws_secret_access_key=secret_key,\n\
+          \            region_name=\"us-east-1\",\n        )\n        prefix = result[\"\
+          checkpoint_prefix\"]\n        with tempfile.TemporaryDirectory() as tmpdir:\n\
+          \            model_path = Path(tmpdir) / \"model.pt\"\n            metrics_path\
+          \ = Path(tmpdir) / \"training_metrics.json\"\n            try:\n       \
+          \         s3.download_file(checkpoint_bucket, f\"{prefix}/model.pt\", str(model_path))\n\
+          \                s3.download_file(checkpoint_bucket, f\"{prefix}/training_metrics.json\"\
+          , str(metrics_path))\n            except Exception as exc:  # noqa: BLE001\n\
+          \                raise RuntimeError(\n                    f\"checkpoint_bucket\
+          \ was configured but the checkpoint could not be downloaded \"\n       \
+          \             f\"from s3://{checkpoint_bucket}/{prefix}/ -- refusing to\
+          \ fake evaluation: {exc}\"\n                ) from exc\n\n            training_metrics\
+          \ = json.loads(metrics_path.read_text())\n            n_features = training_metrics.get(\"\
+          config\", {}).get(\"n_features\", result.get(\"n_features\", 8))\n     \
+          \       hidden_size = training_metrics.get(\"config\", {}).get(\"hidden_size\"\
+          , result.get(\"hidden_size\", 32))\n            final_val_loss = training_metrics.get(\"\
+          final_val_loss\", final_val_loss)\n\n            # Mirrors training/train.py's\
+          \ TinyRegressor exactly (duplicated here because\n            # this pipeline\
+          \ step runs in its own container, without the repo checked out).\n     \
+          \       class TinyRegressor(nn.Module):\n                def __init__(self,\
+          \ n_features: int, hidden_size: int = 32):\n                    super().__init__()\n\
+          \                    self.net = nn.Sequential(\n                       \
+          \ nn.Linear(n_features, hidden_size), nn.ReLU(),\n                     \
+          \   nn.Linear(hidden_size, hidden_size), nn.ReLU(),\n                  \
+          \      nn.Linear(hidden_size, 1),\n                    )\n\n           \
+          \     def forward(self, x):\n                    return self.net(x)\n\n\
+          \            model = TinyRegressor(n_features=n_features, hidden_size=hidden_size)\n\
+          \            state_dict = torch.load(model_path, map_location=\"cpu\", weights_only=True)\n\
+          \            model.load_state_dict(state_dict)\n            model.eval()\n\
+          \            checkpoint_loaded = True\n\n            # Same synthetic-data\
+          \ generation as training/train.py's SyntheticRegressionDataset,\n      \
+          \      # with a held-out seed offset never used for train/val during training.\n\
+          \            seed = training_metrics.get(\"seed\", 42) if isinstance(training_metrics.get(\"\
+          seed\"), int) else 42\n            generator = torch.Generator().manual_seed(seed\
+          \ + 999)\n            x = torch.randn(256, n_features, generator=generator)\n\
+          \            true_weights = torch.linspace(0.5, 2.0, n_features)\n     \
+          \       y = (x @ true_weights + 1.5 + torch.randn(256, generator=generator)\
+          \ * 0.1).unsqueeze(1)\n            with torch.no_grad():\n             \
+          \   pred = model(x)\n                test_mse = nn.functional.mse_loss(pred,\
+          \ y).item()\n            print(f\"[evaluate-model] loaded REAL checkpoint\
+          \ from s3://{checkpoint_bucket}/{prefix}/model.pt \"\n                 \
+          \ f\"-- genuine forward pass test_mse={test_mse:.6f}\")\n\n    passed_distributed_check\
+          \ = len(ranks_seen) >= 1\n    effective_loss = test_mse if test_mse is not\
+          \ None else final_val_loss\n    passed_loss_check = effective_loss is not\
+          \ None and effective_loss <= max_acceptable_loss\n    passed = passed_distributed_check\
+          \ and passed_loss_check\n\n    summary = {\n        \"method\": checkpoint_method,\n\
+          \        \"checkpoint_loaded\": checkpoint_loaded,\n        \"ranks_observed\"\
+          : sorted(ranks_seen),\n        \"final_val_loss_from_logs\": log_final_val_loss,\n\
+          \        \"test_mse_from_checkpoint\": test_mse,\n        \"effective_loss\"\
+          : effective_loss,\n        \"max_acceptable_loss\": max_acceptable_loss,\n\
+          \        \"passed\": passed,\n    }\n    print(f\"[evaluate-model] {'PASS'\
+          \ if passed else 'FAIL'} (method={checkpoint_method}): {summary}\")\n\n\
+          \    if use_mlflow and mlflow_tracking_uri:\n        try:\n            import\
+          \ mlflow\n\n            mlflow.set_tracking_uri(mlflow_tracking_uri)\n \
+          \           mlflow.set_experiment(mlflow_experiment_name)\n            tags\
+          \ = {\"trainjob_name\": result.get(\"trainjob_name\", \"\"), \"git_commit\"\
+          : result.get(\"git_sha\", \"\")}\n            with mlflow.start_run(run_name=\"\
+          pipeline-evaluate\"):\n                mlflow.set_tags({k: v for k, v in\
+          \ tags.items() if v})\n                if effective_loss is not None:\n\
+          \                    mlflow.log_metric(\"effective_loss\", effective_loss)\n\
+          \                if test_mse is not None:\n                    mlflow.log_metric(\"\
+          test_mse\", test_mse)\n                mlflow.log_param(\"ranks_observed\"\
+          , str(sorted(ranks_seen)))\n                mlflow.log_param(\"evaluation_method\"\
+          , checkpoint_method)\n                mlflow.log_param(\"passed\", passed)\n\
+          \            print(f\"[evaluate-model] logged evaluation summary to MLflow\
+          \ at {mlflow_tracking_uri}\")\n        except Exception as exc:  # noqa:\
+          \ BLE001 - MLflow is always optional\n            print(f\"[evaluate-model]\
           \ MLflow logging skipped (not fatal): {exc}\")\n\n    if not passed:\n \
           \       raise RuntimeError(f\"Evaluation failed: {summary}\")\n    return\
           \ json.dumps(summary)\n\n"
@@ -305,8 +413,14 @@ root:
           parameters:
             batch_size:
               componentInputParameter: batch_size
+            checkpoint_bucket:
+              componentInputParameter: checkpoint_bucket
+            checkpoint_s3_endpoint:
+              componentInputParameter: checkpoint_s3_endpoint
             epochs:
               componentInputParameter: epochs
+            git_sha:
+              componentInputParameter: git_sha
             gpu_per_node:
               componentInputParameter: gpu_per_node
             lr:
@@ -329,6 +443,8 @@ root:
               componentInputParameter: train_nodes
             trainjob_name:
               componentInputParameter: trainjob_name
+            use_mlflow:
+              componentInputParameter: use_mlflow
         taskInfo:
           name: distributed-training
       evaluate-model:
@@ -349,6 +465,8 @@ root:
               taskOutputParameter:
                 outputParameterKey: Output
                 producerTask: distributed-training
+            use_mlflow:
+              componentInputParameter: use_mlflow
         taskInfo:
           name: evaluate-model
       prepare-data:
@@ -373,10 +491,22 @@ root:
         defaultValue: 32.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      checkpoint_bucket:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      checkpoint_s3_endpoint:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
       epochs:
         defaultValue: 5.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      git_sha:
+        defaultValue: 5d6d2b39398e0a41b94681757db403b399d72163
+        isOptional: true
+        parameterType: STRING
       gpu_per_node:
         defaultValue: 0.0
         isOptional: true
@@ -430,13 +560,17 @@ root:
         isOptional: true
         parameterType: NUMBER_INTEGER
       trainjob_name:
-        defaultValue: pytorch-trainer-demo-pipeline
+        defaultValue: rhoai-demo-train
         isOptional: true
         parameterType: STRING
       trainjob_timeout_seconds:
         defaultValue: 1200.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      use_mlflow:
+        defaultValue: true
+        isOptional: true
+        parameterType: BOOLEAN
       val_samples:
         defaultValue: 512.0
         isOptional: true

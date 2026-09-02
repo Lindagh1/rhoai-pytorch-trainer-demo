@@ -72,11 +72,11 @@ fi
 
 log_section "AI Pipeline"
 PIPELINE_AVAILABLE=0
-if python3 scripts/pipeline_client.py detect >/dev/null 2>&1; then
+if "${PYTHON_BIN}" scripts/pipeline_client.py detect >/dev/null 2>&1; then
   PIPELINE_AVAILABLE=1
   log_pass "Data Science Pipelines server is reachable"
 
-  UPLOAD_CHECK=$(python3 - <<'PYEOF'
+  UPLOAD_CHECK=$("${PYTHON_BIN}" - <<'PYEOF'
 import os, sys
 sys.path.insert(0, "scripts")
 from pipeline_client import build_client, PIPELINE_NAME
@@ -90,7 +90,7 @@ PYEOF
   if [ -n "$UPLOAD_CHECK" ]; then
     log_pass "Pipeline '${PIPELINE_NAME}' is present on the server (id=${UPLOAD_CHECK})"
 
-    RUN_STATUS_OUTPUT=$(python3 scripts/pipeline_client.py status 2>/dev/null)
+    RUN_STATUS_OUTPUT=$("${PYTHON_BIN}" scripts/pipeline_client.py status 2>/dev/null)
     RUN_STATUS_CODE=$?
     echo "  ${RUN_STATUS_OUTPUT}"
     if [ "$RUN_STATUS_CODE" -eq 0 ]; then
@@ -105,6 +105,13 @@ PYEOF
   fi
 else
   log_optional "No Data Science Pipelines server available -- AI Pipeline checks skipped (this is OPTIONAL, not a failure of the core demo)"
+fi
+
+log_section "Security scan"
+if ./scripts/security-check.sh; then
+  : # already printed PASS
+else
+  fail "Potential secret(s) detected in the working tree -- see 'make security-check' output above"
 fi
 
 log_section "Summary"

@@ -17,6 +17,10 @@ metadata:
     app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
     app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
     app.kubernetes.io/component: training
+    demo.git.sha: "${GIT_SHA_SHORT}"
+  annotations:
+    demo.git.sha: "${GIT_SHA}"
+    demo.image: "${TRAIN_IMAGE}"
 spec:
   runtimeRef:
     apiGroup: trainer.kubeflow.org
@@ -33,9 +37,14 @@ spec:
     env:
       - name: TRAIN_OUTPUT_DIR
         value: "/opt/app-root/src/output"
+      - name: GIT_SHA
+        value: "${GIT_SHA}"
+      - name: TRAINJOB_NAME
+        value: "${TRAINJOB_NAME}"
       - name: MLFLOW_EXPERIMENT_NAME
         value: "${MLFLOW_EXPERIMENT_NAME}"
 ${MLFLOW_TRACKING_URI_ENV}
+${CHECKPOINT_S3_ENV}
     resourcesPerNode:
       requests:
         cpu: "${TRAIN_CPU}"

@@ -36,6 +36,30 @@ def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
+def current_git_sha():
+    result = sh(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"])
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def detect_mlflow_route():
+    """Mirrors scripts/lib.sh's detect_mlflow_uri(): explicit MLFLOW_TRACKING_URI wins,
+    otherwise auto-detect this demo's own MLflow Route (see scripts/mlflow.sh)."""
+    if os.environ.get("USE_MLFLOW") == "false":
+        return ""
+    explicit = os.environ.get("MLFLOW_TRACKING_URI")
+    if explicit:
+        return explicit
+    result = sh(["oc", "get", "route", "mlflow", "-n", NAMESPACE, "-o", "jsonpath={.spec.host}"])
+    if result.returncode == 0 and result.stdout.strip():
+        return f"https://{result.stdout.strip()}"
+    return ""
+
+
+def minio_available():
+    result = sh(["oc", "get", "secret", "minio-credentials", "-n", NAMESPACE])
+    return result.returncode == 0
+
+
 def get_route():
     override = os.environ.get("PIPELINE_ROUTE_HOST")
     if override:
@@ -79,7 +103,7 @@ def build_client():
     except Exception as exc:  # noqa: BLE001
         print(f"Could not reach the Pipeline Server at {host}: {exc}", file=sys.stderr)
         print("If this is a certificate error, set PIPELINE_SSL_CA_CERT to a CA bundle "
-              "(see docs/troubleshooting.md).", file=sys.stderr)
+              "(see TROUBLESHOOTING.md).", file=sys.stderr)
         return None
 
 
@@ -129,9 +153,12 @@ def default_run_params():
         "TRAIN_IMAGE",
         f"image-registry.openshift-image-registry.svc:5000/{NAMESPACE}/{IMAGE_STREAM_NAME}:{IMAGE_TAG}",
     )
+    use_mlflow_env = os.environ.get("USE_MLFLOW", "auto")
+    mlflow_uri = detect_mlflow_route()
+    checkpoint_bucket = os.environ.get("CHECKPOINT_BUCKET", "checkpoints") if minio_available() else ""
     return {
         "namespace": NAMESPACE,
-        "trainjob_name": os.environ.get("TRAINJOB_NAME", "pytorch-trainer-demo-pipeline"),
+        "trainjob_name": os.environ.get("TRAINJOB_NAME", "rhoai-demo-train"),
         "train_image": train_image,
         "train_nodes": int(os.environ.get("TRAIN_NODES", 2)),
         "gpu_per_node": int(os.environ.get("GPU_PER_NODE", 0)),
@@ -145,8 +172,12 @@ def default_run_params():
         "lr": float(os.environ.get("TRAIN_LR", 0.01)),
         "batch_size": int(os.environ.get("TRAIN_BATCH_SIZE", 32)),
         "max_acceptable_loss": float(os.environ.get("MAX_ACCEPTABLE_MSE", 0.5)),
-        "mlflow_tracking_uri": os.environ.get("MLFLOW_TRACKING_URI", ""),
+        "git_sha": os.environ.get("GIT_SHA", current_git_sha()),
+        "use_mlflow": use_mlflow_env != "false" and bool(mlflow_uri),
+        "mlflow_tracking_uri": mlflow_uri,
         "mlflow_experiment_name": os.environ.get("MLFLOW_EXPERIMENT_NAME", "rhoai-pytorch-trainer-demo"),
+        "checkpoint_bucket": checkpoint_bucket,
+        "checkpoint_s3_endpoint": f"http://minio.{NAMESPACE}.svc.cluster.local:9000" if checkpoint_bucket else "",
         "trainjob_timeout_seconds": int(os.environ.get("TRAINJOB_WAIT_TIMEOUT_SECONDS", 1200)),
     }
 
@@ -215,6 +246,24 @@ def cmd_create_schedule(_args):
     return 0
 
 
+def cmd_schedule_status(_args):
+    client = build_client()
+    if client is None:
+        return 1
+    try:
+        jobs = client.list_recurring_runs(page_size=100)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not list recurring runs: {exc}", file=sys.stderr)
+        return 1
+    matched = [j for j in jobs.recurring_runs or [] if j.display_name == SCHEDULE_NAME]
+    if not matched:
+        print(f"NOT CONFIGURED: no recurring run named '{SCHEDULE_NAME}'")
+        return 1
+    job = matched[0]
+    print(f"EXISTS: '{SCHEDULE_NAME}' cron='{SCHEDULE_CRON}' status={job.status} id={job.recurring_run_id}")
+    return 0
+
+
 def cmd_delete_schedule(_args):
     client = build_client()
     if client is None:
@@ -243,6 +292,7 @@ def main():
     status_parser = sub.add_parser("status")
     status_parser.add_argument("run_id", nargs="?", default=None)
     sub.add_parser("create-schedule")
+    sub.add_parser("schedule-status")
     sub.add_parser("delete-schedule")
 
     args = parser.parse_args()
@@ -252,6 +302,7 @@ def main():
         "run": cmd_run,
         "status": cmd_status,
         "create-schedule": cmd_create_schedule,
+        "schedule-status": cmd_schedule_status,
         "delete-schedule": cmd_delete_schedule,
     }
     return handlers[args.command](args)

@@ -92,61 +92,147 @@ if [ -n "$GPU_NODES" ]; then
   TOTAL_GPUS=$(echo "$GPU_NODES" | awk -F= '{sum+=$2} END {print sum+0}')
   log_pass "GPU-visible nodes found (total allocatable nvidia.com/gpu: ${TOTAL_GPUS})"
   echo "$GPU_NODES" | while IFS='=' read -r node gpus; do echo "         - ${node}: ${gpus} GPU(s)"; done
-  NODES_JSON=$(oc get nodes -o json 2>/dev/null || true)
-  FREE_GPUS=$(printf '%s' "$NODES_JSON" | python3 -c '
+  # Allocatable capacity alone is not "free" -- subtract what other pods (this demo's own
+  # or anyone else's) are already requesting cluster-wide, so this never recommends
+  # MODE=gpu when the only GPU is already fully claimed by someone else's workload. This
+  # demo never scales down or evicts another workload to make a GPU "available".
+  USED_GPUS=$(oc get pods -A -o json 2>/dev/null | python3 -c '
 import json,sys
 data=json.load(sys.stdin)
 total=0
-for n in data.get("items", []):
-    alloc = n.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu")
-    if alloc:
-        total += int(alloc)
+for p in data.get("items", []):
+    if p.get("status", {}).get("phase") not in ("Running", "Pending"):
+        continue
+    for c in p.get("spec", {}).get("containers", []):
+        req = c.get("resources", {}).get("requests", {}).get("nvidia.com/gpu")
+        if req:
+            total += int(req)
 print(total)
 ' 2>/dev/null || echo 0)
-  if [ "${FREE_GPUS:-0}" -gt 0 ] 2>/dev/null; then
-    log_pass "GPU capacity currently allocatable: ${FREE_GPUS}"
+  FREE_GPUS=$(( TOTAL_GPUS - USED_GPUS ))
+  if [ "$FREE_GPUS" -gt 0 ] 2>/dev/null; then
+    log_pass "GPU capacity currently free: ${FREE_GPUS} (allocatable=${TOTAL_GPUS}, already requested by running/pending pods cluster-wide=${USED_GPUS})"
   else
-    log_warn "GPU nodes exist but none currently allocatable (likely fully consumed by other workloads) -- CPU demo mode will be used"
+    log_warn "GPU nodes exist (allocatable=${TOTAL_GPUS}) but ${USED_GPUS} already requested by other pods cluster-wide -- none free right now. CPU demo mode will be used; this demo will NOT scale down or evict the workload holding the GPU."
+    FREE_GPUS=0
   fi
 else
   log_warn "No GPU-visible nodes found -- the demo will run in CPU-only distributed mode (see manifests/trainjob-gpu-example.yaml for the GPU scenario)"
+  FREE_GPUS=0
 fi
 
-log_section "Data Science Pipelines / AI Pipelines"
+log_section "Recommended MODE for 'make train' / 'make demo'"
+if [ -n "${GPU_NODES:-}" ] && [ "${FREE_GPUS:-0}" -gt 0 ] 2>/dev/null; then
+  log_pass "Recommended: MODE=gpu (GPU capacity is currently allocatable) -- e.g. 'make train MODE=gpu'"
+else
+  log_pass "Recommended: MODE=cpu (no currently-allocatable GPU) -- e.g. 'make train MODE=cpu' (this is also the default)"
+fi
+
+log_section "Cluster CPU/memory headroom"
+# This demo's own components are deliberately tiny (see manifests/dspa.yaml,
+# manifests/storage.yaml), but on a small/shared sandbox the CLUSTER itself can be at or
+# near 100% CPU allocated by OTHER tenants' workloads before this demo requests anything.
+# This is a real, common failure mode for 'make pipeline-server' (MariaDB/API server pods
+# stuck Pending) that has nothing to do with this repo -- surface it here explicitly
+# instead of letting it look like a silent hang later.
+NODE_JSON=$(oc get nodes -o json 2>/dev/null || true)
+if [ -n "$NODE_JSON" ]; then
+  printf '%s' "$NODE_JSON" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+
+def to_millicpu(q):
+    if q is None:
+        return 0
+    q = str(q)
+    return int(q[:-1]) if q.endswith("m") else int(float(q) * 1000)
+
+cap_cpu = sum(to_millicpu(n.get("status", {}).get("allocatable", {}).get("cpu")) for n in data.get("items", []))
+print(f"__CAP_CPU__{cap_cpu}")
+' > /tmp/preflight_cap_cpu.$$  2>/dev/null || true
+  CAP_CPU=$(grep -o '__CAP_CPU__[0-9]*' /tmp/preflight_cap_cpu.$$ 2>/dev/null | sed 's/__CAP_CPU__//')
+  rm -f /tmp/preflight_cap_cpu.$$
+  PODS_JSON=$(oc get pods -A -o json 2>/dev/null || true)
+  USED_CPU=$(printf '%s' "$PODS_JSON" | python3 -c '
+import json, sys
+
+def to_millicpu(q):
+    if q is None:
+        return 0
+    q = str(q)
+    return int(q[:-1]) if q.endswith("m") else int(float(q) * 1000)
+
+data = json.load(sys.stdin)
+total = 0
+for p in data.get("items", []):
+    if p.get("status", {}).get("phase") not in ("Running", "Pending"):
+        continue
+    for c in p.get("spec", {}).get("containers", []):
+        total += to_millicpu(c.get("resources", {}).get("requests", {}).get("cpu"))
+print(total)
+' 2>/dev/null || echo 0)
+  if [ -n "${CAP_CPU:-}" ] && [ "${CAP_CPU:-0}" -gt 0 ] 2>/dev/null; then
+    FREE_CPU=$(( CAP_CPU - USED_CPU ))
+    PCT_USED=$(( USED_CPU * 100 / CAP_CPU ))
+    if [ "$FREE_CPU" -lt 200 ]; then
+      log_warn "Cluster-wide CPU requests are at ${PCT_USED}% of allocatable (${USED_CPU}m/${CAP_CPU}m, ~${FREE_CPU}m free). 'make pipeline-server' (MariaDB + API server pods) may stay Pending until other tenants' workloads free CPU. This is a shared-sandbox capacity issue, not a bug in this repo -- see TROUBLESHOOTING.md 'make pipeline-server times out waiting for Ready'."
+    else
+      log_pass "Cluster-wide CPU requests: ${PCT_USED}% of allocatable (${USED_CPU}m/${CAP_CPU}m, ~${FREE_CPU}m free) -- enough headroom for this demo's own (small) components"
+    fi
+  else
+    log_warn "Could not compute cluster CPU headroom (non-fatal)"
+  fi
+else
+  log_warn "Could not read node capacity (non-fatal)"
+fi
+
+log_section "OBJECT STORAGE"
+MINIO_DEPLOYED=0
+if oc get deployment minio -n "${NAMESPACE}" >/dev/null 2>&1; then
+  MINIO_DEPLOYED=1
+  MINIO_READY=$(oc get deployment minio -n "${NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+  if [ "${MINIO_READY:-0}" -ge 1 ] 2>/dev/null; then
+    log_pass "Namespace-local MinIO (object storage) is deployed and Ready in '${NAMESPACE}'"
+  else
+    log_warn "Namespace-local MinIO is deployed but not yet Ready in '${NAMESPACE}' (check: oc get pods -l app.kubernetes.io/name=minio -n ${NAMESPACE})"
+  fi
+elif [ -n "${AWS_S3_ENDPOINT:-}" ] || [ -n "${PIPELINE_S3_ENDPOINT:-}" ]; then
+  log_pass "External S3-compatible endpoint provided via environment (AWS_S3_ENDPOINT/PIPELINE_S3_ENDPOINT)"
+else
+  log_optional "No object storage configured yet in '${NAMESPACE}' -- run 'make storage' to deploy a namespace-local MinIO (needed by 'make pipeline-server')"
+fi
+
+log_section "PIPELINE SERVER"
 if oc get crd datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io >/dev/null 2>&1; then
   log_pass "CRD present: DataSciencePipelinesApplication (Data Science Pipelines component installed)"
 else
   log_fail "CRD missing: DataSciencePipelinesApplication -- enable the 'datasciencepipelines' component in the DataScienceCluster"
 fi
-
 DSPA_IN_NAMESPACE=$(oc get datasciencepipelinesapplication -n "${NAMESPACE}" -o name 2>/dev/null || true)
 if [ -n "$DSPA_IN_NAMESPACE" ]; then
   log_pass "A DataSciencePipelinesApplication already exists in namespace '${NAMESPACE}': ${DSPA_IN_NAMESPACE}"
-  DSPA_READY=$(oc get datasciencepipelinesapplication -n "${NAMESPACE}" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-  if [ "$DSPA_READY" = "True" ]; then
-    log_pass "DataSciencePipelinesApplication reports Ready=True"
-  else
-    log_warn "DataSciencePipelinesApplication exists but Ready condition is '${DSPA_READY:-unknown}'"
-  fi
 else
-  log_warn "No DataSciencePipelinesApplication found in namespace '${NAMESPACE}' yet (namespace may not exist yet -- this is expected before 'make bootstrap'; a pipeline server must be created before 'make pipeline' will work, see docs/troubleshooting.md)"
+  log_optional "No DataSciencePipelinesApplication found in namespace '${NAMESPACE}' yet -- run 'make storage' then 'make pipeline-server' (needs object storage above to be PASS first)"
 fi
 
-log_section "Object storage for the pipeline server"
-if [ -n "${AWS_S3_ENDPOINT:-}" ] || [ -n "${PIPELINE_S3_ENDPOINT:-}" ]; then
-  log_pass "S3-compatible endpoint provided via environment (AWS_S3_ENDPOINT/PIPELINE_S3_ENDPOINT)"
+log_section "DSPA STATUS"
+if [ -n "$DSPA_IN_NAMESPACE" ]; then
+  DSPA_READY=$(oc get datasciencepipelinesapplication -n "${NAMESPACE}" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+  if [ "$DSPA_READY" = "True" ]; then
+    log_pass "DataSciencePipelinesApplication reports Ready=True -- 'make pipeline' can run"
+  else
+    log_warn "DataSciencePipelinesApplication exists but Ready condition is '${DSPA_READY:-unknown}' -- do not run 'make pipeline' yet"
+  fi
 else
-  log_optional "No S3 endpoint provided via environment. Needed only if you want 'make deploy-pipeline' to also provision a DataSciencePipelinesApplication -- see README.md 'Pipeline server storage'"
+  log_optional "No DataSciencePipelinesApplication to check yet (see PIPELINE SERVER above)"
 fi
 
 log_section "MLflow (optional)"
-MLFLOW_ROUTE=$(oc get route -A -l 'app.kubernetes.io/name=mlflow' -o name 2>/dev/null | head -n1 || true)
-if [ -n "${MLFLOW_TRACKING_URI:-}" ]; then
-  log_optional "MLFLOW_TRACKING_URI is set (${MLFLOW_TRACKING_URI}) -- training/evaluation will log to it"
-elif [ -n "$MLFLOW_ROUTE" ]; then
-  log_optional "An MLflow route was found on the cluster (${MLFLOW_ROUTE}) but MLFLOW_TRACKING_URI is not set -- export it to use it"
+DETECTED_MLFLOW_URI=$(detect_mlflow_uri)
+if [ -n "$DETECTED_MLFLOW_URI" ]; then
+  log_optional "MLflow is available at ${DETECTED_MLFLOW_URI} -- training/evaluation/pipeline will log to it"
 else
-  log_optional "No MLflow detected and MLFLOW_TRACKING_URI is not set -- training/evaluation will simply skip experiment tracking"
+  log_optional "No MLflow detected in '${NAMESPACE}' -- run 'make mlflow' to deploy a lightweight namespace-local instance, or export MLFLOW_TRACKING_URI to point at an existing one. Training/evaluation work identically without it."
 fi
 
 log_section "Summary"

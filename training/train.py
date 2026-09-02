@@ -229,6 +229,59 @@ class MLflowLogger:
 
 
 # --------------------------------------------------------------------------------------
+# Optional S3 checkpoint persistence
+# --------------------------------------------------------------------------------------
+class CheckpointStore:
+    """Best-effort upload of the model checkpoint + training metrics to an S3-compatible
+    bucket (the demo's namespace-local MinIO instance, see manifests/storage.yaml), so
+    the pipeline's evaluate-model step can download and load the *real* checkpoint file
+    instead of only inferring success from pod logs.
+
+    Entirely optional: if CHECKPOINT_S3_BUCKET is unset, or boto3/the endpoint is
+    unreachable, training still succeeds -- this mirrors how MLflowLogger degrades.
+    """
+
+    def __init__(self, env: DistEnv):
+        self.enabled = False
+        self.env = env
+        if env.rank != 0:
+            return
+        self.bucket = os.environ.get("CHECKPOINT_S3_BUCKET")
+        if not self.bucket:
+            log(env, "CHECKPOINT_S3_BUCKET not set -- S3 checkpoint upload disabled (this is fine).")
+            return
+        self.prefix = os.environ.get("CHECKPOINT_S3_PREFIX", "").strip("/")
+        try:
+            import boto3
+
+            self._client = boto3.client(
+                "s3",
+                endpoint_url=os.environ.get("S3_ENDPOINT_URL"),
+                aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+                region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+            )
+            self.enabled = True
+            log(env, f"S3 checkpoint upload enabled -> bucket={self.bucket} prefix={self.prefix or '(none)'}")
+        except Exception as exc:  # noqa: BLE001 - deliberately broad: this is optional
+            log(env, f"S3 checkpoint upload disabled (could not initialize client: {exc})")
+            self.enabled = False
+
+    def _key(self, filename: str) -> str:
+        return f"{self.prefix}/{filename}" if self.prefix else filename
+
+    def upload(self, path: Path) -> None:
+        if not self.enabled:
+            return
+        try:
+            key = self._key(path.name)
+            self._client.upload_file(str(path), self.bucket, key)
+            log(self.env, f"uploaded {path.name} to s3://{self.bucket}/{key}")
+        except Exception as exc:  # noqa: BLE001
+            log(self.env, f"S3 upload of {path.name} failed (ignored, non-fatal): {exc}")
+
+
+# --------------------------------------------------------------------------------------
 # Training / validation loop
 # --------------------------------------------------------------------------------------
 def build_dataloaders(env: DistEnv, args: argparse.Namespace):
@@ -273,6 +326,10 @@ def train(args: argparse.Namespace) -> Path:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = nn.MSELoss()
 
+    git_sha = os.environ.get("GIT_SHA", "")
+    trainjob_name = os.environ.get("TRAINJOB_NAME", "")
+    pipeline_run_id = os.environ.get("PIPELINE_RUN_ID", "")
+
     mlflow_logger = MLflowLogger(env, experiment_name=args.experiment_name)
     mlflow_logger.log_params(
         {
@@ -285,6 +342,16 @@ def train(args: argparse.Namespace) -> Path:
             "backend": env.backend,
         }
     )
+    if mlflow_logger.enabled:
+        try:
+            tags = {"trainjob_name": trainjob_name, "git_commit": git_sha, "world_size": str(env.world_size)}
+            if pipeline_run_id:
+                tags["pipeline_run"] = pipeline_run_id
+            mlflow_logger._mlflow.set_tags({k: v for k, v in tags.items() if v})
+        except Exception as exc:  # noqa: BLE001
+            log(env, f"MLflow set_tags failed (ignored): {exc}")
+
+    checkpoint_store = CheckpointStore(env)
 
     history = []
     start_time = time.time()
@@ -345,6 +412,9 @@ def train(args: argparse.Namespace) -> Path:
                     "final_val_loss": history[-1]["val_loss"] if history else None,
                     "world_size": env.world_size,
                     "elapsed_seconds": elapsed,
+                    "git_sha": git_sha,
+                    "trainjob_name": trainjob_name,
+                    "pipeline_run_id": pipeline_run_id,
                     "config": {
                         "epochs": args.epochs,
                         "lr": args.lr,
@@ -361,6 +431,8 @@ def train(args: argparse.Namespace) -> Path:
 
         mlflow_logger.log_model_artifact(checkpoint_path)
         mlflow_logger.log_model_artifact(metrics_path)
+        checkpoint_store.upload(checkpoint_path)
+        checkpoint_store.upload(metrics_path)
 
     mlflow_logger.end()
     teardown_distributed(env)

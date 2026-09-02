@@ -1,0 +1,41 @@
+# Builds the demo's MLflow Tracking Server image directly from this GitHub repository,
+# the same way manifests/buildconfig.yaml builds the training image: an OpenShift Build
+# pushing to the internal registry, no external registry dependency.
+#
+# Rendered with envsubst by scripts/mlflow.sh.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ${MLFLOW_IMAGE_STREAM_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: mlflow
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ${MLFLOW_IMAGE_STREAM_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: mlflow
+spec:
+  source:
+    type: Git
+    git:
+      uri: ${GIT_REPO_URL}
+      ref: ${GIT_REF}
+${SOURCE_SECRET_BLOCK}
+    contextDir: "/"
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: mlflow/Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: ${MLFLOW_IMAGE_STREAM_NAME}:${IMAGE_TAG}
+  triggers: []

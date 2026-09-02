@@ -28,11 +28,12 @@ if [ "$NS_LABEL" != "${PART_OF_LABEL}" ]; then
 fi
 
 log_section "Best-effort: deleting the scheduled run (if any) before removing the namespace"
-python3 scripts/pipeline_client.py delete-schedule 2>/dev/null || log_warn "Could not delete the recurring run (Pipeline Server may be unreachable) -- it will be removed along with the namespace's pipeline database anyway"
+"${PYTHON_BIN}" scripts/pipeline_client.py delete-schedule 2>/dev/null || log_warn "Could not delete the recurring run (Pipeline Server may be unreachable) -- it will be removed along with the namespace's pipeline database anyway"
 
 log_section "Deleting namespace '${NAMESPACE}'"
-echo "This namespace is labeled app.kubernetes.io/part-of=${PART_OF_LABEL} and owns only this demo's resources:"
-oc get all,trainjob,role,rolebinding,serviceaccount,buildconfig,imagestream -n "${NAMESPACE}" -o name 2>/dev/null | sed 's/^/  - /' || true
+echo "This namespace is labeled app.kubernetes.io/part-of=${PART_OF_LABEL} and owns only this demo's resources"
+echo "(training, storage/MinIO, Pipeline Server/DSPA, MLflow -- all namespace-scoped, nothing cluster-wide):"
+oc get all,trainjob,datasciencepipelinesapplication,role,rolebinding,serviceaccount,buildconfig,imagestream,pvc -n "${NAMESPACE}" -o name 2>/dev/null | sed 's/^/  - /' || true
 
 if [ -t 0 ] && [ "${CONFIRM:-}" != "yes" ]; then
   read -r -p "Type the namespace name ('${NAMESPACE}') to confirm deletion: " REPLY

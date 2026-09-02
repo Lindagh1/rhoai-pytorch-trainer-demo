@@ -85,15 +85,101 @@ script that "pretends" to train inside the pipeline step -- the actual distribut
 runs exactly the way `make train` runs it directly, just triggered from within the pipeline
 instead of from a script on your laptop.
 
+## Why every pipeline run's TrainJob has a unique name
+
+`trainjob_name` is only a *base* name (default `rhoai-demo-train`). The
+`distributed-training` component appends a timestamp and a short random suffix at task
+**runtime** (plain Python `time`/`uuid`, not a KFP backend placeholder) before creating the
+`TrainJob`, e.g. `rhoai-demo-train-260902143012-a1b2c`. This is deliberately NOT done with
+one of KFP's `dsl.PIPELINE_JOB_ID_PLACEHOLDER`-style backend substitutions: that feature is
+recent enough in the Kubeflow Pipelines backend that relying on it would silently break on
+older Data Science Pipelines versions (the raw, unresolved placeholder string is not a
+valid Kubernetes object name and the TrainJob creation would fail outright). Generating the
+suffix in plain Python inside the component works identically on any KFP v2 backend and
+guarantees two concurrent pipeline runs (or a recurring/scheduled run firing while a manual
+run is still in flight) never collide on the same `TrainJob` name.
+
+## Checkpoint persistence: worker -> checkpoint -> object storage -> evaluate
+
+`training/train.py` always writes `model.pt` and `training_metrics.json` to
+`TRAIN_OUTPUT_DIR` on the training pod's local (ephemeral) filesystem -- that part is
+unconditional and doesn't require any extra infrastructure (this is what `make train`,
+which never touches object storage, already relies on for its own summary).
+
+When the namespace-local MinIO instance is present (`make storage`), the pipeline's
+`distributed-training` step ALSO injects `CHECKPOINT_S3_BUCKET` /
+`CHECKPOINT_S3_PREFIX=<unique-trainjob-name>` / `S3_ENDPOINT_URL` and MinIO credentials
+(via `valueFrom.secretKeyRef`, never a literal value) into the TrainJob's env. Rank 0 of
+`training/train.py` then uploads both files to
+`s3://<checkpoint-bucket>/<unique-trainjob-name>/` using `boto3` (see `CheckpointStore` in
+`training/train.py`) as a best-effort, non-fatal step -- training still succeeds even if
+this upload fails, the same way MLflow logging degrades.
+
+`evaluate-model` downloads those two objects, and:
+
+1. loads `training_metrics.json` for the real `final_val_loss` the training run recorded
+   (not a value re-derived from logs), and
+2. loads `model.pt`'s state dict into a `TinyRegressor` (the same architecture as
+   `training/train.py`, necessarily duplicated inline since this pipeline step runs in its
+   own container without the repository checked out) and runs a genuine forward pass on a
+   freshly generated held-out test set, producing `test_mse`.
+
+If no object storage was configured for a given run (e.g. `make storage` was never run),
+`evaluate-model` falls back to reading the TrainJob's pod logs to confirm multiple ranks
+executed and to extract the final loss from log lines -- and reports
+`"method": "logs-only"` in its output so it is always clear which evidence a given
+evaluation is actually based on. It never claims to have loaded a checkpoint it did not
+load.
+
+```
+Worker (rank 0) --writes--> model.pt, training_metrics.json (local disk)
+       |
+       +--uploads (boto3, best-effort)--> s3://checkpoints/<trainjob-name>/ (MinIO)
+                                                      |
+                                        evaluate-model downloads + torch.load()s
+                                                      |
+                                        genuine forward pass -> test_mse
+```
+
+## Why object storage is a namespace-local MinIO, not an external dependency
+
+Data Science Pipelines (and this demo's own checkpoint persistence) both need an
+S3-compatible bucket. Requiring the user to bring their own external bucket/credentials
+would break the "clone and `make demo`" reproducibility goal on a sandbox that has none.
+`scripts/storage.sh` deploys a small, single-replica MinIO `Deployment` + `PersistentVolumeClaim`
++ `Service` entirely inside this demo's own namespace, with credentials generated randomly
+at apply time and stored ONLY in a `Secret` in that namespace (never in Git, never
+printed). It is explicitly not a production storage recommendation; it exists purely so a
+brand new sandbox with nothing but a default `StorageClass` can reach a fully working
+Pipeline Server without a human provisioning an external bucket first. If you already have
+a real S3-compatible bucket/DSPA, skip `make storage`/`make pipeline-server` entirely and
+point `MLFLOW_TRACKING_URI`/your own DSPA at it instead.
+
+## Why the Pipeline Server is a DataSciencePipelinesApplication this repo creates
+
+`scripts/pipeline-server.sh` applies `manifests/dspa.yaml` (one
+`DataSciencePipelinesApplication` per namespace, which is what the OpenShift AI Dashboard's
+"Pipelines" tab looks for) referencing the MinIO `Service` DNS name and the
+`minio-credentials` Secret as `objectStorage.externalStorage`, and waits for
+`status.conditions[type=Ready]=True` before returning success. `make pipeline` is never run
+against a DSPA that isn't actually Ready -- this script fails loudly instead.
+
+## Why MLflow can be a real, deployed instance -- not just a URL you bring
+
+`scripts/mlflow.sh` builds a small MLflow Tracking Server image from THIS repository
+(`mlflow/Containerfile`, same OpenShift-Build-from-Git pattern as the training image) and
+deploys it with a SQLite backend store and the namespace-local MinIO bucket `mlflow` as its
+artifact root. This is optional and separate from `make demo` (which never fails if MLflow
+isn't deployed) -- but when you run `make mlflow`, every subsequent `make train` / `make
+pipeline` run auto-detects it (via its `Route`, see `scripts/lib.sh`'s `detect_mlflow_uri`)
+without needing to export `MLFLOW_TRACKING_URI` by hand. `training/train.py`,
+`training/evaluate.py`, and the pipeline's `evaluate-model` step tag every MLflow run with
+`trainjob_name` and `git_commit`, so a run in the MLflow UI is always traceable back to the
+exact `TrainJob` and Git commit that produced it.
+
 `evaluate-model` reads the *real* per-pod logs of that TrainJob (looking for multiple
-distinct `rank=` values and the final loss) rather than reading a shared checkpoint file
-from disk. This is a deliberate reproducibility trade-off: sharing a PVC between TrainJob
-pods (whose container/job names are defined by the platform-provided
-`ClusterTrainingRuntime`, and can differ across OpenShift AI versions) and pipeline task
-pods would make the pipeline's correctness depend on an internal implementation detail of
-the runtime template. Reading pod logs through the Kubernetes API only depends on the
-stable, documented `TrainJob`/pod contract, so the same pipeline definition works
-unmodified across sandboxes.
+distinct `rank=` values) as one source of evidence of distributed execution, in addition
+to the checkpoint-based evaluation described above.
 
 ## Why the pipeline's `ServiceAccount` has minimal RBAC
 
@@ -105,11 +191,28 @@ unmodified across sandboxes.
 - read-only on `clustertrainingruntimes`/`trainingruntimes` (to validate `runtimeRef`
   before creating a job),
 - read-only on `jobsets.jobset.x-k8s.io` (the underlying primitive Kubeflow Trainer uses),
-- read-only on `pods`/`pods/log` (to observe workers and extract training metrics).
+- read-only on `pods`/`pods/log` (to observe workers and extract training metrics),
+- `get` on exactly one named Secret, `minio-credentials` (via `resourceNames:
+  ["minio-credentials"]`, not a wildcard on all Secrets) -- needed only so `evaluate-model`
+  can obtain the MinIO access/secret key to download the real checkpoint (see "Checkpoint
+  persistence" above). No other Secret in the namespace is readable by this Role.
 
 No `cluster-admin`, no cluster-scoped `RoleBinding`, no access outside the demo namespace.
 `scripts/deploy-pipeline.sh` passes `service_account=pipeline-trainjob-runner` explicitly
 when starting or scheduling a run, so every step in a given run shares this identity.
+
+## Git SHA / image traceability
+
+Every training image built by `scripts/build-training-image.sh` is annotated on its
+`ImageStreamTag` with `demo.git.sha` (read straight from the OpenShift `Build` object's own
+`.spec.revision.git.commit`, not re-derived) and `demo.git.repo`. Every `TrainJob` --
+whether created directly by `make train` or by the pipeline's `distributed-training` step
+-- carries the same commit as a `demo.git.sha` label (truncated to 12 chars, to stay within
+Kubernetes label length/charset limits) and a full-length `demo.git.sha` annotation, plus a
+`GIT_SHA` environment variable that reaches `training/train.py`, which in turn writes it
+into `training_metrics.json` and (if MLflow is active) as an MLflow run tag `git_commit`.
+The result: given any MLflow run, `TrainJob`, or training image, you can always answer
+"which exact commit produced this?" without guessing.
 
 ## Why MLflow is complementary, not an orchestrator
 

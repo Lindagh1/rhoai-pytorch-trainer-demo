@@ -47,6 +47,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # Read-only, and scoped by resourceNames to this ONE secret: evaluate-model needs the
+  # MinIO access/secret key to download the real checkpoint uploaded by the TrainJob (see
+  # ARCHITECTURE.md "Checkpoint persistence"). No access to any other Secret in the
+  # namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["minio-credentials"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

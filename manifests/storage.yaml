@@ -1,0 +1,131 @@
+# A small, namespace-local MinIO instance used as the S3-compatible object storage this
+# demo needs for two things: the Data Science Pipelines server's own metadata/artifact
+# store, and (optionally) as the destination training/train.py uploads its checkpoint to
+# so evaluate-model can load the *real* file instead of only reading pod logs.
+#
+# This is deliberately NOT a production storage recommendation -- it exists only so this
+# repository can bootstrap a working Pipeline Server on a brand new sandbox that has no
+# S3 bucket available, without ever requiring a manually-created external bucket or a
+# credential committed to Git. Credentials are generated randomly at apply time (see
+# scripts/storage.sh) and stored only in a Kubernetes Secret inside this demo's namespace.
+#
+# Rendered with envsubst: NAMESPACE and MINIO_STORAGE_SIZE are the only variables used.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: storage
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: ${MINIO_STORAGE_SIZE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/name: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    spec:
+      containers:
+        - name: minio
+          image: ${MINIO_IMAGE}
+          args: ["server", "/data", "--console-address", ":9001"]
+          envFrom:
+            - secretRef:
+                name: minio-credentials
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/name: minio
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+# Optional: a route to the MinIO console, purely for demo convenience (showing buckets
+# visually). Never required by any script -- everything here talks to the in-cluster
+# Service DNS name (minio.${NAMESPACE}.svc:9000) instead.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: minio-console
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: storage
+spec:
+  to:
+    kind: Service
+    name: minio
+  port:
+    targetPort: console
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

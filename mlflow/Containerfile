@@ -1,0 +1,25 @@
+# Reproducible MLflow Tracking Server image for this demo. Built the same way as the
+# training image: an OpenShift Build pulling this exact repository/path and pushing to
+# the internal image registry -- no external registry dependency (see
+# manifests/buildconfig-mlflow.yaml).
+#
+# This is a demo-grade MLflow deployment (SQLite backend store, single replica): it exists
+# so the pipeline has something real to log parameters/metrics/artifacts to on a fresh
+# sandbox that has no MLflow instance of its own, not as a production tracking service.
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+WORKDIR /opt/app-root/src
+
+COPY mlflow/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY mlflow/entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh && \
+    mkdir -p /data && chmod -R g+rwX /data
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+ENTRYPOINT ["./entrypoint.sh"]

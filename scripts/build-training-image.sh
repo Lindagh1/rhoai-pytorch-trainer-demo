@@ -62,6 +62,17 @@ if [ "$PHASE" = "Complete" ]; then
   IMAGE_REF=$(oc get imagestreamtag "${IMAGE_STREAM_NAME}:${IMAGE_TAG}" -n "${NAMESPACE}" -o jsonpath='{.image.dockerImageReference}' 2>/dev/null || echo "unknown")
   log_pass "Build complete. Image: ${IMAGE_REF}"
   echo "internal reference for TrainJob: image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/${IMAGE_STREAM_NAME}:${IMAGE_TAG}"
+
+  # Traceability: stamp the built ImageStreamTag with the exact commit it was built from,
+  # so `oc describe imagestreamtag` (and TrainJob labels copied from GIT_SHA) can always
+  # answer "which commit produced this image?" without guessing.
+  BUILD_GIT_SHA=$(oc get "${BUILD_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.revision.git.commit}' 2>/dev/null || echo "")
+  if [ -n "$BUILD_GIT_SHA" ]; then
+    oc annotate imagestreamtag "${IMAGE_STREAM_NAME}:${IMAGE_TAG}" -n "${NAMESPACE}" \
+      "demo.git.sha=${BUILD_GIT_SHA}" "demo.git.repo=${GIT_REPO_URL}" --overwrite >/dev/null
+    log_info "Tagged image with demo.git.sha=${BUILD_GIT_SHA}"
+    echo "GIT_SHA=${BUILD_GIT_SHA}"
+  fi
 else
   log_fail "Build ended in phase '${PHASE}'. See 'oc logs ${BUILD_NAME} -n ${NAMESPACE}' for details."
   exit 1

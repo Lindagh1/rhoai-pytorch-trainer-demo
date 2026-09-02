@@ -51,10 +51,13 @@ if [ "$EXISTING_PHASE" != "running" ]; then
   GPU_REQUEST_LINE=$(gpu_resource_lines "${GPU_PER_NODE}")
   GPU_LIMIT_LINE=$(gpu_resource_lines "${GPU_PER_NODE}")
   MLFLOW_TRACKING_URI_ENV=$(mlflow_env_block)
+  CHECKPOINT_S3_ENV=$(checkpoint_s3_env_block)
   export NAMESPACE TRAINJOB_NAME TRAIN_IMAGE TRAIN_NODES TRAIN_CPU TRAIN_MEMORY TRAIN_EPOCHS \
-    TRAIN_LR TRAIN_BATCH_SIZE MLFLOW_EXPERIMENT_NAME GPU_REQUEST_LINE GPU_LIMIT_LINE MLFLOW_TRACKING_URI_ENV
+    TRAIN_LR TRAIN_BATCH_SIZE MLFLOW_EXPERIMENT_NAME GPU_REQUEST_LINE GPU_LIMIT_LINE \
+    MLFLOW_TRACKING_URI_ENV CHECKPOINT_S3_ENV GIT_SHA GIT_SHA_SHORT
 
   log_section "Creating TrainJob"
+  echo "git sha:          ${GIT_SHA}"
   render_manifest manifests/trainjob-template.yaml | oc apply -f -
 fi
 

@@ -1,0 +1,47 @@
+# One-shot Job that creates the buckets this demo needs inside the MinIO instance
+# (manifests/storage.yaml). Re-applying is idempotent: `mc mb --ignore-existing` never
+# fails if the buckets already exist, and scripts/storage.sh deletes any previous
+# completed Job before re-creating it so `make storage` can be re-run safely.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init-buckets
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: storage
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+        app.kubernetes.io/component: storage
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mc
+          image: ${MINIO_MC_IMAGE}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              mc alias set localminio "http://minio.${NAMESPACE}.svc:9000" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+              mc mb --ignore-existing "localminio/${PIPELINE_BUCKET}"
+              mc mb --ignore-existing "localminio/${MLFLOW_BUCKET}"
+              mc mb --ignore-existing "localminio/${CHECKPOINT_BUCKET}"
+              echo "Buckets ready: ${PIPELINE_BUCKET}, ${MLFLOW_BUCKET}, ${CHECKPOINT_BUCKET}"
+          envFrom:
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: HOME
+              value: "/tmp"
+            - name: PIPELINE_BUCKET
+              value: "${PIPELINE_BUCKET}"
+            - name: MLFLOW_BUCKET
+              value: "${MLFLOW_BUCKET}"
+            - name: CHECKPOINT_BUCKET
+              value: "${CHECKPOINT_BUCKET}"

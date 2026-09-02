@@ -1,0 +1,84 @@
+# Data Science Pipelines server (Kubeflow Pipelines v2) for this namespace, backed by the
+# namespace-local MinIO instance (manifests/storage.yaml) as external object storage, and
+# an in-namespace MariaDB (deployed by the Data Science Pipelines Operator itself, not by
+# this repo) for pipeline run metadata.
+#
+# The Dashboard looks for exactly one DataSciencePipelinesApplication per namespace, so
+# this repo creates exactly one, named "${DSPA_NAME}".
+#
+# Rendered with envsubst by scripts/pipeline-server.sh.
+apiVersion: datasciencepipelinesapplications.opendatahub.io/v1
+kind: DataSciencePipelinesApplication
+metadata:
+  name: ${DSPA_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: pipeline-server
+spec:
+  dspVersion: v2
+  # This is a shared, resource-constrained sandbox (single node, no headroom). All DSPA
+  # components below get deliberately small requests so the pipeline server can still be
+  # scheduled without touching -- let alone scaling down -- anyone else's workloads.
+  apiServer:
+    deploy: true
+    enableSamplePipeline: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+  persistenceAgent:
+    deploy: true
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+  scheduledWorkflow:
+    deploy: true
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+  workflowController:
+    deploy: true
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+  database:
+    mariaDB:
+      deploy: true
+      pipelineDBName: mlpipeline
+      pvcSize: 1Gi
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+  objectStorage:
+    disableHealthCheck: false
+    externalStorage:
+      host: "minio.${NAMESPACE}.svc.cluster.local"
+      port: "9000"
+      scheme: http
+      bucket: "${PIPELINE_BUCKET}"
+      region: us-east-1
+      s3CredentialsSecret:
+        secretName: minio-credentials
+        accessKey: MINIO_ROOT_USER
+        secretKey: MINIO_ROOT_PASSWORD
