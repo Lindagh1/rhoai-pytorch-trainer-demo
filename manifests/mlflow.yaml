@@ -68,9 +68,12 @@ spec:
                 secretKeyRef:
                   name: minio-credentials
                   key: MINIO_ROOT_PASSWORD
+          # Deliberately tiny requests -- this is a demo-grade single-replica server, and on
+          # a busy shared sandbox even 100m of CPU headroom cannot be assumed (see
+          # TROUBLESHOOTING.md "shared sandbox has no free CPU").
           resources:
             requests:
-              cpu: 100m
+              cpu: 20m
               memory: 256Mi
             limits:
               cpu: 500m
