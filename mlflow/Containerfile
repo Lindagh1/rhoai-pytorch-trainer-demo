@@ -16,10 +16,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # entrypoint.sh is already committed with the executable bit set (mode 755) -- COPY
 # preserves it. Re-running `chmod` on a just-copied file fails with "Operation not
-# permitted" under some restricted OpenShift Build SCCs/capability sets, so this only
-# chmods the directory it creates itself, never a file that came from the build context.
+# permitted" under some restricted OpenShift Build SCCs/capability sets. /data is never
+# created here either -- manifests/mlflow.yaml mounts a PVC at /data at *runtime*, which
+# Kubernetes creates and permissions via the namespace's allocated fsGroup, not a
+# directory baked into the image (attempting `mkdir /data` at build time fails with
+# "Permission denied" under the same restricted SCC, since "/" itself isn't writable by
+# the arbitrary non-root UID the build runs as).
 COPY mlflow/entrypoint.sh ./entrypoint.sh
-RUN mkdir -p /data && chmod -R g+rwX /data
 
 ENV PYTHONUNBUFFERED=1
 
