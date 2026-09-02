@@ -15,9 +15,13 @@ if oc_login_check; then
 else
   line "OpenShift" "FAIL (not logged in)"
 fi
+# See scripts/preflight.sh for why the version is derived from the CSV name rather than a
+# second `oc get <name> -A` query (invalid for a namespaced resource, fails silently here).
 RHOAI_CSV=$(oc get csv -A -o name 2>/dev/null | grep -E 'rhods-operator|opendatahub-operator' | head -n1)
 if [ -n "$RHOAI_CSV" ]; then
-  RHOAI_VERSION=$(oc get "$RHOAI_CSV" -A -o jsonpath='{.items[0].spec.version}' 2>/dev/null)
+  RHOAI_NAME="${RHOAI_CSV#*/}"
+  RHOAI_VERSION="${RHOAI_NAME##*.v}"
+  [ "$RHOAI_VERSION" = "$RHOAI_NAME" ] && RHOAI_VERSION="${RHOAI_NAME#*-operator.}"
   line "OpenShift AI" "${RHOAI_VERSION:-installed}"
 else
   line "OpenShift AI" "unknown (no permission to list CSVs, or not installed)"
@@ -87,7 +91,19 @@ echo ""
 echo "== MLFLOW =="
 MLFLOW_URI=$(detect_mlflow_uri)
 if [ -n "$MLFLOW_URI" ]; then
-  line "MLflow" "READY (${MLFLOW_URI})"
+  # A Route existing doesn't mean the server behind it is actually up -- check the
+  # Deployment's own readyReplicas too (this demo's own MLflow only; an externally-managed
+  # MLFLOW_TRACKING_URI has no Deployment here to check, so it's reported as-is).
+  if oc get deployment mlflow -n "${NAMESPACE}" >/dev/null 2>&1; then
+    MLFLOW_READY=$(oc get deployment mlflow -n "${NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+    if [ "${MLFLOW_READY:-0}" -ge 1 ] 2>/dev/null; then
+      line "MLflow" "READY (${MLFLOW_URI})"
+    else
+      line "MLflow" "NOT READY -- Route exists but deployment/mlflow has 0 ready replicas (check: oc describe pod -l app.kubernetes.io/name=mlflow -n ${NAMESPACE})"
+    fi
+  else
+    line "MLflow" "READY (${MLFLOW_URI}, externally managed)"
+  fi
 else
   line "MLflow" "OPTIONAL -- not configured (make mlflow, or export MLFLOW_TRACKING_URI)"
 fi

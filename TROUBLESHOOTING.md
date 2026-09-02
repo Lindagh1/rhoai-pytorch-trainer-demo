@@ -176,6 +176,17 @@ different, already-fixed issue: `manifests/storage-init-job.yaml` now sets `HOME
 the `mc` container so it can write its config under OpenShift's restricted (arbitrary
 non-root UID) SCC.
 
+## `make mlflow` — MLflow deployment stays `Pending` (never `CrashLoopBackOff`)
+
+`oc get pods -l app.kubernetes.io/name=mlflow -n "${NAMESPACE}"` shows `Pending` with a
+`FailedScheduling` event mentioning `Insufficient cpu`. This is the exact same
+shared-sandbox capacity issue as `make pipeline-server` above (see "Cluster CPU/memory
+headroom" in `make preflight`) -- MLflow's own request is already as low as 20m CPU, so if
+even that can't schedule, the cluster itself has no free CPU right now, cluster-wide, from
+other tenants. `make preflight` / `make status` report this honestly as `WARN`/`NOT READY`
+rather than claiming Ready because a Route exists (a Route existing never means the pod
+behind it is actually up).
+
 ## `make mlflow` — MLflow pod is `CrashLoopBackOff`
 
 ```bash

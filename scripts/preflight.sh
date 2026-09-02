@@ -47,10 +47,16 @@ else
 fi
 
 log_section "OpenShift AI (RHOAI/ODH) version"
+# `oc get <name> -A` is invalid for a namespaced resource (a CSV) -- it errors with "a
+# resource cannot be retrieved by name across all namespaces" and, under `set +e`, silently
+# leaves RHOAI_VERSION empty. The CSV's own name already ends in its version
+# (e.g. "rhods-operator.3.5.0"), so derive it from there instead of a second, broken query.
 RHOAI_CSV=$(oc get csv -A -o name 2>/dev/null | grep -E 'rhods-operator|opendatahub-operator' | head -n1 || true)
 if [ -n "$RHOAI_CSV" ]; then
-  RHOAI_VERSION=$(oc get "$RHOAI_CSV" -A -o jsonpath='{.items[0].spec.version}' 2>/dev/null || true)
-  log_pass "OpenShift AI operator installed (${RHOAI_CSV#*/}${RHOAI_VERSION:+, version $RHOAI_VERSION})"
+  RHOAI_NAME="${RHOAI_CSV#*/}"
+  RHOAI_VERSION="${RHOAI_NAME##*.v}"
+  [ "$RHOAI_VERSION" = "$RHOAI_NAME" ] && RHOAI_VERSION="${RHOAI_NAME#*-operator.}"
+  log_pass "OpenShift AI operator installed (${RHOAI_NAME}${RHOAI_VERSION:+, version $RHOAI_VERSION})"
 else
   log_warn "Could not find a rhods-operator/opendatahub-operator CSV (may lack cluster-wide list permission, or RHOAI is not installed)"
 fi
@@ -230,7 +236,18 @@ fi
 log_section "MLflow (optional)"
 DETECTED_MLFLOW_URI=$(detect_mlflow_uri)
 if [ -n "$DETECTED_MLFLOW_URI" ]; then
-  log_optional "MLflow is available at ${DETECTED_MLFLOW_URI} -- training/evaluation/pipeline will log to it"
+  # A Route existing doesn't mean the server behind it actually responds -- check this
+  # demo's own Deployment readiness too when it's the one that created the Route.
+  if oc get deployment mlflow -n "${NAMESPACE}" >/dev/null 2>&1; then
+    MLFLOW_DEPLOY_READY=$(oc get deployment mlflow -n "${NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+    if [ "${MLFLOW_DEPLOY_READY:-0}" -ge 1 ] 2>/dev/null; then
+      log_optional "MLflow is available and Ready at ${DETECTED_MLFLOW_URI} -- training/evaluation/pipeline will log to it"
+    else
+      log_warn "MLflow Route exists (${DETECTED_MLFLOW_URI}) but deployment/mlflow has 0 ready replicas -- training/evaluation will try to log to it and silently skip tracking if it can't connect (check: oc describe pod -l app.kubernetes.io/name=mlflow -n ${NAMESPACE})"
+    fi
+  else
+    log_optional "MLflow is available at ${DETECTED_MLFLOW_URI} (externally managed) -- training/evaluation/pipeline will log to it"
+  fi
 else
   log_optional "No MLflow detected in '${NAMESPACE}' -- run 'make mlflow' to deploy a lightweight namespace-local instance, or export MLFLOW_TRACKING_URI to point at an existing one. Training/evaluation work identically without it."
 fi
