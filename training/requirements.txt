@@ -1,0 +1,10 @@
+# Pinned runtime dependencies baked into the training container image
+# (training/Containerfile). This is the ONLY dependency set that matters for
+# reproducibility of the actual TrainJob -- requirements-dev.txt is local-tooling only.
+
+torch==2.4.1
+numpy==1.26.4
+
+# Optional experiment tracking client. train.py/evaluate.py degrade gracefully if
+# MLFLOW_TRACKING_URI is unset, even though this package is always present in the image.
+mlflow==2.16.2

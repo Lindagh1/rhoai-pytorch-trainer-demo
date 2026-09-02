@@ -1,0 +1,48 @@
+# Builds the training image directly from this GitHub repository using an OpenShift
+# Build (Docker strategy) and pushes it to an ImageStream in the internal OpenShift
+# registry -- no external/private registry required.
+#
+# GitHub -> OpenShift Build -> training image -> TrainJob -> Kubeflow Trainer
+#
+# Rendered with envsubst by scripts/build-training-image.sh, which auto-detects
+# GIT_REPO_URL and GIT_REF from `git remote`/`git rev-parse` unless explicitly overridden,
+# so nothing sandbox-specific is hardcoded here.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ${IMAGE_STREAM_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: training-image
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ${IMAGE_STREAM_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: training-image
+spec:
+  source:
+    type: Git
+    git:
+      uri: ${GIT_REPO_URL}
+      ref: ${GIT_REF}
+${SOURCE_SECRET_BLOCK}
+    contextDir: "/"
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: training/Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: ${IMAGE_STREAM_NAME}:${IMAGE_TAG}
+  # No automatic Git webhook/ConfigChange trigger: builds are started explicitly by
+  # `make build` / scripts/build-training-image.sh, so re-running bootstrap never
+  # triggers surprise rebuilds.
+  triggers: []

@@ -1,0 +1,61 @@
+# --- Secrets: NEVER commit these ---
+*.token
+*token*
+*.pem
+*.key
+*credentials*
+*secret*
+!manifests/**/*secret*template*
+kubeconfig*
+.kube/
+*.kubeconfig
+.env
+.env.*
+!.env.example
+*.htpasswd
+mlflow-credentials*
+s3-credentials*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+.venv-*/
+venv/
+env/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+notebooks/*.ipynb_checkpoints
+
+# --- KFP / pipeline compilation artifacts (kept only intentionally) ---
+pipeline/__pycache__/
+*.tar.gz
+
+# --- Local runtime / scratch state ---
+.state/
+state/
+*.log
+*.out
+training/artifacts/
+training/data/
+mlruns/
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# --- OpenShift / oc local caches ---
+.oc/

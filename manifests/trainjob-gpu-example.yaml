@@ -1,0 +1,45 @@
+# EXAMPLE ONLY -- not applied automatically by any script or Makefile target.
+#
+# This is the same TrainJob as manifests/trainjob-template.yaml, but written out fully
+# for a concrete GPU scenario, to show what a real customer/production run looks like:
+# 2 nodes, 1 GPU each. Copy/adapt it, or just run:
+#
+#   TRAIN_NODES=2 GPU_PER_NODE=1 make train
+#
+# ...which renders manifests/trainjob-template.yaml with the same values.
+#
+# Replace <NAMESPACE> and <TRAIN_IMAGE> before applying this file directly.
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: pytorch-trainer-demo-gpu-example
+  namespace: <NAMESPACE>
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: training
+spec:
+  runtimeRef:
+    apiGroup: trainer.kubeflow.org
+    kind: ClusterTrainingRuntime
+    name: torch-distributed
+  trainer:
+    image: <TRAIN_IMAGE>   # e.g. image-registry.openshift-image-registry.svc:5000/<namespace>/pytorch-trainer-demo:latest
+    command: ["torchrun", "train.py"]
+    args:
+      - "--epochs=5"
+      - "--lr=0.01"
+      - "--batch-size=32"
+    numNodes: 2
+    env:
+      - name: TRAIN_OUTPUT_DIR
+        value: "/opt/app-root/src/output"
+    resourcesPerNode:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+        nvidia.com/gpu: "1"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+        nvidia.com/gpu: "1"

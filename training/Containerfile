@@ -1,0 +1,32 @@
+# Reproducible training image for the RHOAI PyTorch Trainer demo.
+#
+# Built either:
+#   - by an OpenShift BuildConfig (manifests/buildconfig.yaml) pulling this exact
+#     repository/path and pushing to the internal OpenShift image registry, or
+#   - locally with `podman build` / `docker build` for a quick smoke test.
+#
+# Uses a Red Hat UBI Python base image so the build works from the public
+# registry.access.redhat.com mirror without any private registry credentials.
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+WORKDIR /opt/app-root/src
+
+COPY training/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY training/train.py training/evaluate.py ./
+
+ENV PYTHONUNBUFFERED=1 \
+    TRAIN_OUTPUT_DIR=/opt/app-root/src/output
+
+# UBI python images already run as a non-root arbitrary UID (OpenShift-compatible).
+# Only chmod the directory this build step itself owns (the output dir it just created) --
+# the base image's own files are root-owned and don't need write access at runtime.
+RUN mkdir -p "${TRAIN_OUTPUT_DIR}" && chmod -R g+rwX "${TRAIN_OUTPUT_DIR}"
+
+# No fixed distributed launch command here on purpose: the TrainJob (or a plain
+# `podman run`) supplies the actual command, so the same image serves both the
+# single-process smoke test and the multi-node torchrun launch.
+ENTRYPOINT []
+CMD ["python3", "train.py"]

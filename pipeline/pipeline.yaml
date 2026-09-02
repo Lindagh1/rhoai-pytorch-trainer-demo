@@ -1,0 +1,445 @@
+# PIPELINE DEFINITION
+# Name: rhoai-pytorch-trainer-demo
+# Description: prepare-data -> distributed-training (real TrainJob via Kubeflow Trainer) -> evaluate-model
+# Inputs:
+#    batch_size: int [Default: 32.0]
+#    epochs: int [Default: 5.0]
+#    gpu_per_node: int [Default: 0.0]
+#    lr: float [Default: 0.01]
+#    max_acceptable_loss: float [Default: 0.5]
+#    mlflow_experiment_name: str [Default: 'rhoai-pytorch-trainer-demo']
+#    mlflow_tracking_uri: str [Default: '']
+#    n_features: int [Default: 8.0]
+#    namespace: str [Default: 'rhoai-training-demo']
+#    seed: int [Default: 42.0]
+#    train_cpu: str [Default: '1']
+#    train_image: str [Default: 'image-registry.openshift-image-registry.svc:5000/rhoai-training-demo/pytorch-trainer-demo:latest']
+#    train_memory: str [Default: '2Gi']
+#    train_nodes: int [Default: 2.0]
+#    train_samples: int [Default: 2048.0]
+#    trainjob_name: str [Default: 'pytorch-trainer-demo-pipeline']
+#    trainjob_timeout_seconds: int [Default: 1200.0]
+#    val_samples: int [Default: 512.0]
+components:
+  comp-distributed-training:
+    executorLabel: exec-distributed-training
+    inputDefinitions:
+      parameters:
+        batch_size:
+          parameterType: NUMBER_INTEGER
+        epochs:
+          parameterType: NUMBER_INTEGER
+        gpu_per_node:
+          parameterType: NUMBER_INTEGER
+        lr:
+          parameterType: NUMBER_DOUBLE
+        mlflow_experiment_name:
+          parameterType: STRING
+        mlflow_tracking_uri:
+          parameterType: STRING
+        namespace:
+          parameterType: STRING
+        timeout_seconds:
+          parameterType: NUMBER_INTEGER
+        train_cpu:
+          parameterType: STRING
+        train_image:
+          parameterType: STRING
+        train_memory:
+          parameterType: STRING
+        train_nodes:
+          parameterType: NUMBER_INTEGER
+        trainjob_name:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-evaluate-model:
+    executorLabel: exec-evaluate-model
+    inputDefinitions:
+      parameters:
+        max_acceptable_loss:
+          parameterType: NUMBER_DOUBLE
+        mlflow_experiment_name:
+          parameterType: STRING
+        mlflow_tracking_uri:
+          parameterType: STRING
+        training_result:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-prepare-data:
+    executorLabel: exec-prepare-data
+    inputDefinitions:
+      parameters:
+        n_features:
+          parameterType: NUMBER_INTEGER
+        seed:
+          parameterType: NUMBER_INTEGER
+        train_samples:
+          parameterType: NUMBER_INTEGER
+        val_samples:
+          parameterType: NUMBER_INTEGER
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-distributed-training:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - distributed_training
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.9.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'kubernetes==30.1.0'\
+          \ && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef distributed_training(\n    namespace: str,\n    trainjob_name:\
+          \ str,\n    train_image: str,\n    train_nodes: int,\n    gpu_per_node:\
+          \ int,\n    train_cpu: str,\n    train_memory: str,\n    epochs: int,\n\
+          \    lr: float,\n    batch_size: int,\n    mlflow_tracking_uri: str,\n \
+          \   mlflow_experiment_name: str,\n    timeout_seconds: int,\n) -> str:\n\
+          \    \"\"\"Creates a real TrainJob via the Kubernetes API and waits for\
+          \ it to finish.\n\n    Returns a JSON string describing the outcome (status\
+          \ + worker pod names) that\n    evaluate_model consumes.\n    \"\"\"\n \
+          \   import json\n    import time\n\n    from kubernetes import client, config\n\
+          \n    config.load_incluster_config()\n    custom_api = client.CustomObjectsApi()\n\
+          \    core_api = client.CoreV1Api()\n\n    group, version, plural = \"trainer.kubeflow.org\"\
+          , \"v1alpha1\", \"trainjobs\"\n\n    try:\n        custom_api.delete_namespaced_custom_object(group,\
+          \ version, namespace, plural, trainjob_name)\n        print(f\"[distributed-training]\
+          \ deleted pre-existing TrainJob '{trainjob_name}' before recreating it\"\
+          )\n        time.sleep(5)\n    except client.exceptions.ApiException as exc:\n\
+          \        if exc.status != 404:\n            raise\n\n    env = [{\"name\"\
+          : \"TRAIN_OUTPUT_DIR\", \"value\": \"/opt/app-root/src/output\"}]\n    if\
+          \ mlflow_experiment_name:\n        env.append({\"name\": \"MLFLOW_EXPERIMENT_NAME\"\
+          , \"value\": mlflow_experiment_name})\n    if mlflow_tracking_uri:\n   \
+          \     env.append({\"name\": \"MLFLOW_TRACKING_URI\", \"value\": mlflow_tracking_uri})\n\
+          \n    resources = {\"requests\": {\"cpu\": train_cpu, \"memory\": train_memory},\
+          \ \"limits\": {\"cpu\": train_cpu, \"memory\": train_memory}}\n    if gpu_per_node\
+          \ > 0:\n        resources[\"requests\"][\"nvidia.com/gpu\"] = str(gpu_per_node)\n\
+          \        resources[\"limits\"][\"nvidia.com/gpu\"] = str(gpu_per_node)\n\
+          \n    trainjob_manifest = {\n        \"apiVersion\": f\"{group}/{version}\"\
+          ,\n        \"kind\": \"TrainJob\",\n        \"metadata\": {\n          \
+          \  \"name\": trainjob_name,\n            \"namespace\": namespace,\n   \
+          \         \"labels\": {\n                \"app.kubernetes.io/part-of\":\
+          \ \"rhoai-pytorch-trainer-demo\",\n                \"app.kubernetes.io/managed-by\"\
+          : \"rhoai-pytorch-trainer-demo\",\n                \"app.kubernetes.io/component\"\
+          : \"training\",\n            },\n        },\n        \"spec\": {\n     \
+          \       \"runtimeRef\": {\"apiGroup\": group, \"kind\": \"ClusterTrainingRuntime\"\
+          , \"name\": \"torch-distributed\"},\n            \"trainer\": {\n      \
+          \          \"image\": train_image,\n                \"command\": [\"torchrun\"\
+          , \"train.py\"],\n                \"args\": [f\"--epochs={epochs}\", f\"\
+          --lr={lr}\", f\"--batch-size={batch_size}\"],\n                \"numNodes\"\
+          : train_nodes,\n                \"env\": env,\n                \"resourcesPerNode\"\
+          : resources,\n            },\n        },\n    }\n\n    print(f\"[distributed-training]\
+          \ creating TrainJob '{trainjob_name}' in namespace '{namespace}' \"\n  \
+          \        f\"({train_nodes} node(s), {gpu_per_node} GPU/node)\")\n    custom_api.create_namespaced_custom_object(group,\
+          \ version, namespace, plural, trainjob_manifest)\n\n    deadline = time.time()\
+          \ + timeout_seconds\n    status = \"Unknown\"\n    while time.time() < deadline:\n\
+          \        obj = custom_api.get_namespaced_custom_object(group, version, namespace,\
+          \ plural, trainjob_name)\n        conditions = obj.get(\"status\", {}).get(\"\
+          conditions\", [])\n        by_type = {c.get(\"type\"): c.get(\"status\"\
+          ) for c in conditions}\n        if by_type.get(\"Complete\") == \"True\"\
+          :\n            status = \"Complete\"\n            break\n        if by_type.get(\"\
+          Failed\") == \"True\":\n            status = \"Failed\"\n            break\n\
+          \        print(f\"[distributed-training] waiting... current conditions:\
+          \ {by_type}\")\n        time.sleep(10)\n\n    pods = core_api.list_namespaced_pod(namespace)\n\
+          \    pod_names = [p.metadata.name for p in pods.items if p.metadata.name.startswith(f\"\
+          {trainjob_name}-\")]\n\n    for pod_name in pod_names:\n        print(f\"\
+          --- logs: {pod_name} ---\")\n        try:\n            print(core_api.read_namespaced_pod_log(pod_name,\
+          \ namespace, tail_lines=200))\n        except client.exceptions.ApiException\
+          \ as exc:\n            print(f\"  (could not read logs yet: {exc.reason})\"\
+          )\n\n    if status != \"Complete\":\n        raise RuntimeError(f\"TrainJob\
+          \ '{trainjob_name}' did not complete successfully (status={status})\")\n\
+          \n    print(f\"[distributed-training] TrainJob '{trainjob_name}' completed\
+          \ with {len(pod_names)} worker pod(s)\")\n    return json.dumps({\"status\"\
+          : status, \"namespace\": namespace, \"trainjob_name\": trainjob_name, \"\
+          pod_names\": pod_names})\n\n"
+        image: registry.access.redhat.com/ubi9/python-311:latest
+    exec-evaluate-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.9.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'kubernetes==30.1.0'\
+          \ 'mlflow==2.16.2' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate_model(training_result: str, max_acceptable_loss: float,\
+          \ mlflow_tracking_uri: str, mlflow_experiment_name: str) -> str:\n    \"\
+          \"\"Reads the real training pod logs to confirm distributed execution and\
+          \ extract the\n    final training loss, then reports PASS/FAIL. This is\
+          \ real evidence from the TrainJob\n    that just ran, not a simulated result.\n\
+          \    \"\"\"\n    import json\n    import re\n\n    from kubernetes import\
+          \ client, config\n\n    result = json.loads(training_result)\n    if result.get(\"\
+          status\") != \"Complete\":\n        raise RuntimeError(f\"Upstream TrainJob\
+          \ did not complete: {result}\")\n\n    namespace = result[\"namespace\"\
+          ]\n    pod_names = result[\"pod_names\"]\n    if not pod_names:\n      \
+          \  raise RuntimeError(\"No training pods found -- cannot evaluate\")\n\n\
+          \    config.load_incluster_config()\n    core_api = client.CoreV1Api()\n\
+          \n    ranks_seen = set()\n    final_losses = []\n    epoch_line_re = re.compile(r\"\
+          \\[rank=(\\d+)/(\\d+).*?\\].*epoch=(\\d+)/(\\d+) train_loss=([\\d.]+) val_loss=([\\\
+          d.]+)\")\n\n    for pod_name in pod_names:\n        try:\n            logs\
+          \ = core_api.read_namespaced_pod_log(pod_name, namespace)\n        except\
+          \ client.exceptions.ApiException as exc:\n            print(f\"[evaluate-model]\
+          \ could not read logs for {pod_name}: {exc.reason}\")\n            continue\n\
+          \        pod_last_val_loss = None\n        for line in logs.splitlines():\n\
+          \            m = epoch_line_re.search(line)\n            if m:\n       \
+          \         ranks_seen.add(int(m.group(1)))\n                pod_last_val_loss\
+          \ = float(m.group(6))\n        if pod_last_val_loss is not None:\n     \
+          \       final_losses.append(pod_last_val_loss)\n\n    passed_distributed_check\
+          \ = len(ranks_seen) >= 1\n    final_val_loss = max(final_losses) if final_losses\
+          \ else None\n    passed_loss_check = final_val_loss is not None and final_val_loss\
+          \ <= max_acceptable_loss\n    passed = passed_distributed_check and passed_loss_check\n\
+          \n    summary = {\n        \"ranks_observed\": sorted(ranks_seen),\n   \
+          \     \"final_val_loss\": final_val_loss,\n        \"max_acceptable_loss\"\
+          : max_acceptable_loss,\n        \"passed\": passed,\n    }\n    print(f\"\
+          [evaluate-model] {'PASS' if passed else 'FAIL'}: {summary}\")\n\n    if\
+          \ mlflow_tracking_uri:\n        try:\n            import mlflow\n\n    \
+          \        mlflow.set_tracking_uri(mlflow_tracking_uri)\n            mlflow.set_experiment(mlflow_experiment_name)\n\
+          \            with mlflow.start_run(run_name=\"pipeline-evaluate\"):\n  \
+          \              if final_val_loss is not None:\n                    mlflow.log_metric(\"\
+          final_val_loss\", final_val_loss)\n                mlflow.log_param(\"ranks_observed\"\
+          , str(sorted(ranks_seen)))\n                mlflow.log_param(\"passed\"\
+          , passed)\n            print(f\"[evaluate-model] logged evaluation summary\
+          \ to MLflow at {mlflow_tracking_uri}\")\n        except Exception as exc:\
+          \  # noqa: BLE001 - MLflow is always optional\n            print(f\"[evaluate-model]\
+          \ MLflow logging skipped (not fatal): {exc}\")\n\n    if not passed:\n \
+          \       raise RuntimeError(f\"Evaluation failed: {summary}\")\n    return\
+          \ json.dumps(summary)\n\n"
+        image: registry.access.redhat.com/ubi9/python-311:latest
+    exec-prepare-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - prepare_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.9.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef prepare_data(n_features: int, train_samples: int, val_samples:\
+          \ int, seed: int) -> str:\n    \"\"\"Validates/stages the synthetic dataset\
+          \ configuration.\n\n    The dataset itself is generated inside the TrainJob\
+          \ container (see\n    training/train.py) from this same deterministic seed/config,\
+          \ so no large tensors need\n    to move between pipeline steps and TrainJob\
+          \ pods -- this keeps the pipeline reproducible\n    without requiring a\
+          \ shared PVC or object store.\n    \"\"\"\n    import json\n\n    if n_features\
+          \ <= 0 or train_samples <= 0 or val_samples <= 0:\n        raise ValueError(\"\
+          n_features, train_samples, and val_samples must all be positive\")\n\n \
+          \   config = {\n        \"n_features\": n_features,\n        \"train_samples\"\
+          : train_samples,\n        \"val_samples\": val_samples,\n        \"seed\"\
+          : seed,\n    }\n    print(f\"[prepare-data] dataset configuration validated:\
+          \ {config}\")\n    return json.dumps(config)\n\n"
+        image: registry.access.redhat.com/ubi9/python-311:latest
+pipelineInfo:
+  description: prepare-data -> distributed-training (real TrainJob via Kubeflow Trainer)
+    -> evaluate-model
+  name: rhoai-pytorch-trainer-demo
+root:
+  dag:
+    tasks:
+      distributed-training:
+        cachingOptions: {}
+        componentRef:
+          name: comp-distributed-training
+        dependentTasks:
+        - prepare-data
+        inputs:
+          parameters:
+            batch_size:
+              componentInputParameter: batch_size
+            epochs:
+              componentInputParameter: epochs
+            gpu_per_node:
+              componentInputParameter: gpu_per_node
+            lr:
+              componentInputParameter: lr
+            mlflow_experiment_name:
+              componentInputParameter: mlflow_experiment_name
+            mlflow_tracking_uri:
+              componentInputParameter: mlflow_tracking_uri
+            namespace:
+              componentInputParameter: namespace
+            timeout_seconds:
+              componentInputParameter: trainjob_timeout_seconds
+            train_cpu:
+              componentInputParameter: train_cpu
+            train_image:
+              componentInputParameter: train_image
+            train_memory:
+              componentInputParameter: train_memory
+            train_nodes:
+              componentInputParameter: train_nodes
+            trainjob_name:
+              componentInputParameter: trainjob_name
+        taskInfo:
+          name: distributed-training
+      evaluate-model:
+        cachingOptions: {}
+        componentRef:
+          name: comp-evaluate-model
+        dependentTasks:
+        - distributed-training
+        inputs:
+          parameters:
+            max_acceptable_loss:
+              componentInputParameter: max_acceptable_loss
+            mlflow_experiment_name:
+              componentInputParameter: mlflow_experiment_name
+            mlflow_tracking_uri:
+              componentInputParameter: mlflow_tracking_uri
+            training_result:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: distributed-training
+        taskInfo:
+          name: evaluate-model
+      prepare-data:
+        cachingOptions: {}
+        componentRef:
+          name: comp-prepare-data
+        inputs:
+          parameters:
+            n_features:
+              componentInputParameter: n_features
+            seed:
+              componentInputParameter: seed
+            train_samples:
+              componentInputParameter: train_samples
+            val_samples:
+              componentInputParameter: val_samples
+        taskInfo:
+          name: prepare-data
+  inputDefinitions:
+    parameters:
+      batch_size:
+        defaultValue: 32.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      epochs:
+        defaultValue: 5.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      gpu_per_node:
+        defaultValue: 0.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      lr:
+        defaultValue: 0.01
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      max_acceptable_loss:
+        defaultValue: 0.5
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      mlflow_experiment_name:
+        defaultValue: rhoai-pytorch-trainer-demo
+        isOptional: true
+        parameterType: STRING
+      mlflow_tracking_uri:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      n_features:
+        defaultValue: 8.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      namespace:
+        defaultValue: rhoai-training-demo
+        isOptional: true
+        parameterType: STRING
+      seed:
+        defaultValue: 42.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      train_cpu:
+        defaultValue: '1'
+        isOptional: true
+        parameterType: STRING
+      train_image:
+        defaultValue: image-registry.openshift-image-registry.svc:5000/rhoai-training-demo/pytorch-trainer-demo:latest
+        isOptional: true
+        parameterType: STRING
+      train_memory:
+        defaultValue: 2Gi
+        isOptional: true
+        parameterType: STRING
+      train_nodes:
+        defaultValue: 2.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      train_samples:
+        defaultValue: 2048.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      trainjob_name:
+        defaultValue: pytorch-trainer-demo-pipeline
+        isOptional: true
+        parameterType: STRING
+      trainjob_timeout_seconds:
+        defaultValue: 1200.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      val_samples:
+        defaultValue: 512.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.9.0

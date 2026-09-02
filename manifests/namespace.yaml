@@ -1,0 +1,13 @@
+# Namespace created and owned entirely by this demo.
+#
+# Rendered with envsubst (see scripts/bootstrap.sh) so NAMESPACE can be overridden with:
+#   export NAMESPACE=my-demo
+#
+# Applied with `oc apply -f -`, so re-running bootstrap is idempotent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo

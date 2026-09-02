@@ -1,0 +1,35 @@
+# Local development / tooling dependencies only.
+# This file is NOT used inside the training container image — see training/Containerfile
+# for the exact, pinned runtime dependencies used by the TrainJob.
+#
+# Used for: running the notebook locally, compiling the KFP pipeline (`make compile-pipeline`),
+# linting, and running train.py locally on a laptop (single process, CPU) before it ever
+# touches the cluster.
+
+# --- Notebook / exploration ---
+jupyter==1.1.1
+notebook==7.3.2
+matplotlib==3.10.0
+
+# --- Training (CPU-only local smoke test of training/train.py) ---
+torch==2.4.1
+numpy==1.26.4
+
+# --- Kubeflow Pipelines SDK ---
+# Pinned KFP v2 SDK used to compile pipeline/pipeline.py -> pipeline/pipeline.yaml.
+# Compatible with OpenShift AI Data Science Pipelines 2.x (KFP v2 / Argo Workflows backend).
+kfp==2.9.0
+kfp-kubernetes==1.3.0
+
+# --- Kubernetes / OpenShift interaction from Python (used by pipeline components) ---
+kubernetes==30.1.0
+
+# --- Optional experiment tracking client (only used if MLFLOW_TRACKING_URI is set) ---
+mlflow==2.16.2
+
+# --- Lint / format ---
+ruff==0.6.9
+
+# --- Misc ---
+pyyaml==6.0.2
+requests==2.32.3

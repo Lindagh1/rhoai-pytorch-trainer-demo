@@ -1,0 +1,3 @@
+# SDK used to compile pipeline/pipeline.py -> pipeline/pipeline.yaml (see `make compile-pipeline`).
+# Pin this exact version to keep the compiled IR YAML deterministic across machines/CI.
+kfp==2.9.0

@@ -1,0 +1,67 @@
+# Minimum RBAC for the AI Pipeline to create/watch TrainJobs, and read training pod logs
+# for evaluation. No cluster-admin, no cluster-scoped bindings, no touching resources
+# outside this namespace.
+#
+# The dedicated ServiceAccount below (pipeline-trainjob-runner) is what scripts/deploy-pipeline.sh
+# passes as `service_account=` when starting/scheduling a pipeline run, so every pipeline
+# step (prepare-data, distributed-training, evaluate-model) executes under this identity.
+#
+# Rendered with envsubst; NAMESPACE comes from the same variable as everywhere else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipeline-trainjob-runner
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: pipeline-rbac
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trainjob-operator
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: pipeline-rbac
+rules:
+  # Create/read/watch/delete TrainJobs created by this demo -- the core capability the
+  # pipeline's distributed-training step needs.
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read-only visibility into ClusterTrainingRuntime so the pipeline/scripts can verify
+  # the runtime referenced by runtimeRef actually exists before creating a TrainJob.
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["clustertrainingruntimes", "trainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  # Kubeflow Trainer v2 TrainJobs are backed by JobSet -- read-only visibility to observe
+  # worker Job/replica status while waiting for completion.
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch"]
+  # Read training pod status and logs to confirm multiple ranks executed and to extract
+  # the final loss for the evaluate-model step.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-trainjob-runner-binding
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: pipeline-rbac
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-trainjob-runner
+    namespace: ${NAMESPACE}
+roleRef:
+  kind: Role
+  name: trainjob-operator
+  apiGroup: rbac.authorization.k8s.io

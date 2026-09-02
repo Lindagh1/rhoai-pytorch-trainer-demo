@@ -1,0 +1,47 @@
+# Distributed PyTorch TrainJob, rendered with envsubst by scripts/run-trainjob.sh (and used
+# the same way by pipeline/pipeline.py's distributed-training component).
+#
+# Defaults to CPU-only so the orchestration can be demonstrated even when no GPU is
+# available on the sandbox. Set GPU_PER_NODE>0 (scripts export GPU_REQUEST_LINE/
+# GPU_LIMIT_LINE accordingly) to request GPUs -- see manifests/trainjob-gpu-example.yaml
+# for a fully-written-out GPU scenario.
+#
+# Nothing here hardcodes a node count or GPU count: TRAIN_NODES / GPU_PER_NODE /
+# TRAIN_CPU / TRAIN_MEMORY are all variables with defaults in the Makefile.
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: ${TRAINJOB_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/managed-by: rhoai-pytorch-trainer-demo
+    app.kubernetes.io/component: training
+spec:
+  runtimeRef:
+    apiGroup: trainer.kubeflow.org
+    kind: ClusterTrainingRuntime
+    name: torch-distributed
+  trainer:
+    image: ${TRAIN_IMAGE}
+    command: ["torchrun", "train.py"]
+    args:
+      - "--epochs=${TRAIN_EPOCHS}"
+      - "--lr=${TRAIN_LR}"
+      - "--batch-size=${TRAIN_BATCH_SIZE}"
+    numNodes: ${TRAIN_NODES}
+    env:
+      - name: TRAIN_OUTPUT_DIR
+        value: "/opt/app-root/src/output"
+      - name: MLFLOW_EXPERIMENT_NAME
+        value: "${MLFLOW_EXPERIMENT_NAME}"
+${MLFLOW_TRACKING_URI_ENV}
+    resourcesPerNode:
+      requests:
+        cpu: "${TRAIN_CPU}"
+        memory: "${TRAIN_MEMORY}"
+${GPU_REQUEST_LINE}
+      limits:
+        cpu: "${TRAIN_CPU}"
+        memory: "${TRAIN_MEMORY}"
+${GPU_LIMIT_LINE}
