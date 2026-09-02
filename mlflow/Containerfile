@@ -14,9 +14,12 @@ COPY mlflow/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# entrypoint.sh is already committed with the executable bit set (mode 755) -- COPY
+# preserves it. Re-running `chmod` on a just-copied file fails with "Operation not
+# permitted" under some restricted OpenShift Build SCCs/capability sets, so this only
+# chmods the directory it creates itself, never a file that came from the build context.
 COPY mlflow/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh && \
-    mkdir -p /data && chmod -R g+rwX /data
+RUN mkdir -p /data && chmod -R g+rwX /data
 
 ENV PYTHONUNBUFFERED=1
 

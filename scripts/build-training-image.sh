@@ -68,6 +68,13 @@ if [ "$PHASE" = "Complete" ]; then
   # answer "which commit produced this image?" without guessing.
   BUILD_GIT_SHA=$(oc get "${BUILD_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.revision.git.commit}' 2>/dev/null || echo "")
   if [ -n "$BUILD_GIT_SHA" ]; then
+    # A Docker-strategy BuildConfig pushes straight to the registry, which only ever
+    # populates ImageStream.status.tags -- it never creates a spec.tags[] entry. Without
+    # one, `oc annotate imagestreamtag` fails with "is not a spec tag in imagestream ...,
+    # cannot be updated" because there is no spec object to persist the annotation on.
+    # Self-tagging (pointing the tag at its own current image) creates that spec entry;
+    # doing this on every build keeps it pointing at the image just pushed.
+    oc tag "${IMAGE_STREAM_NAME}:${IMAGE_TAG}" "${IMAGE_STREAM_NAME}:${IMAGE_TAG}" -n "${NAMESPACE}" >/dev/null
     oc annotate imagestreamtag "${IMAGE_STREAM_NAME}:${IMAGE_TAG}" -n "${NAMESPACE}" \
       "demo.git.sha=${BUILD_GIT_SHA}" "demo.git.repo=${GIT_REPO_URL}" --overwrite >/dev/null
     log_info "Tagged image with demo.git.sha=${BUILD_GIT_SHA}"
